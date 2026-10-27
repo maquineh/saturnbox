@@ -1,0 +1,14 @@
+[package]
+name = "saturn-disc"
+version = "0.1.0"
+edition = "2021"
+description = "Sega Saturn ISO 9660 and BIN/CUE reader"
+license = "MIT"
+
+[lib]
+name = "saturn_disc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "saturn-disc"
+path = "src/main.rs"

@@ -1,0 +1,155 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+layout(local_size_x=8, local_size_y=8) in;
+struct Primitive { uvec4 flags; ivec4 ab; ivec4 cd; ivec4 clip; uvec4 tex; uvec4 shades; };
+layout(std430, binding=0) readonly buffer Vram { uint vram[]; };
+layout(std430, binding=1) buffer Framebuffer { uint pixels[]; };
+layout(std430, binding=2) readonly buffer Commands { Primitive commands[]; };
+layout(push_constant) uniform Batch {
+    uint count;
+    uint left;
+    uint top;
+    uint right;
+    uint bottom;
+} batch;
+
+uint byteAt(uint address) {
+    return (vram[address >> 2u] >> ((address & 3u) * 8u)) & 255u;
+}
+uint wordAt(uint address) {
+    if (address > 0x7fffeu) return 0u;
+    return (byteAt(address) << 8u) | byteAt(address + 1u);
+}
+uint sampleTexture(Primitive p, ivec2 source) {
+    uint mode = (p.flags.z >> 3u) & 7u;
+    uint index = uint(source.y) * p.tex.y + uint(source.x);
+    bool transparentZero = (p.flags.z & 0x40u) == 0u;
+    uint dot;
+    if (mode <= 1u) {
+        dot = (wordAt(p.tex.x + (index / 4u) * 2u) >> ((3u - (index & 3u)) * 4u)) & 15u;
+        if (transparentZero && dot == 0u) return 0u;
+        if (mode == 1u) return wordAt(p.flags.w * 8u + dot * 2u);
+        return (p.flags.w & 0x7ff0u) | dot;
+    }
+    if (mode <= 4u) {
+        uint packed = wordAt(p.tex.x + (index / 2u) * 2u);
+        dot = (index & 1u) == 0u ? packed >> 8u : packed & 255u;
+        if (transparentZero && dot == 0u) return 0u;
+        uint mask = mode == 2u ? 63u : mode == 3u ? 127u : 255u;
+        return (p.flags.w & (0x7fffu & ~mask)) | (dot & mask);
+    }
+    return wordAt(p.tex.x + index * 2u);
+}
+double cross2(dvec2 a, dvec2 b) { return a.x * b.y - a.y * b.x; }
+bool quadUV(Primitive p, ivec2 xy, out dvec2 uv) {
+    precise dvec2 a = dvec2(p.ab.xy);
+    precise dvec2 b = dvec2(p.ab.zw) - a;
+    precise dvec2 c = dvec2(p.cd.zw) - a;
+    precise dvec2 d = a - dvec2(p.ab.zw) + dvec2(p.cd.xy) - dvec2(p.cd.zw);
+    precise dvec2 pos = dvec2(xy) - a;
+    precise double q = -cross2(b, d);
+    precise double l = cross2(pos, d) - cross2(b, c);
+    precise double k = cross2(pos, c);
+    double roots[2];
+    int count = 0;
+    if (abs(q) < 1e-9) {
+        if (abs(l) > 1e-9) roots[count++] = -k / l;
+    } else {
+        precise double discriminant = l*l - 4.0*q*k;
+        if (discriminant >= 0.0) {
+            double r = sqrt(discriminant);
+            roots[count++] = (-l + r) / (2.0*q);
+            roots[count++] = (-l - r) / (2.0*q);
+        }
+    }
+    for (int i=0; i<count; ++i) {
+        precise double u = roots[i];
+        if (u < -1e-7 || u > 1.0+1e-7) continue;
+        precise dvec2 axis = c + d*u;
+        if (max(abs(axis.x), abs(axis.y)) < 1e-9) {
+            if (all(lessThan(abs(pos - b*u), dvec2(1e-7)))) {
+                uv = dvec2(clamp(u, 0.0, 1.0), 0.0); return true;
+            }
+            continue;
+        }
+        precise double v = abs(axis.x) > abs(axis.y)
+            ? (pos.x - b.x*u) / axis.x : (pos.y - b.y*u) / axis.y;
+        if (v < -1e-7 || v > 1.0+1e-7) continue;
+        uv = clamp(dvec2(u,v), dvec2(0.0), dvec2(1.0));
+        return true;
+    }
+    return false;
+}
+uint shadeAt(Primitive p, dvec2 uv) {
+    uint shade = 0u;
+    for (uint shift=0u; shift<=10u; shift+=5u) {
+        dvec4 s = dvec4((p.shades >> shift) & uvec4(31u));
+        precise double value = (s.x + (s.y-s.x)*uv.x)*(1.0-uv.y)
+            + (s.w + (s.z-s.w)*uv.x)*uv.y;
+        shade |= uint(clamp(int(value), 0, 31)) << shift;
+    }
+    return shade;
+}
+uint halfColor(uint c) { return (c >> 1u) & 0x3defu; }
+void main() {
+    ivec2 xy = ivec2(gl_GlobalInvocationID.xy) + ivec2(batch.left, batch.top);
+    if (xy.x > int(batch.right) || xy.y > int(batch.bottom)) return;
+    uint outputIndex = uint(xy.y)*512u + uint(xy.x);
+    uint destination = pixels[outputIndex];
+    // Each pixel is owned by one invocation. Ordered command evaluation
+    // preserves translucent feedback without inter-command atomics/barriers.
+    for (uint i=0u; i<batch.count; ++i) {
+        Primitive p = commands[i];
+        if (any(lessThan(xy,p.clip.xy)) || any(greaterThan(xy,p.clip.zw))) continue;
+        dvec2 uv = dvec2(0.0);
+        uint color = p.flags.w;
+        bool textured = false;
+        ivec2 source;
+        if (p.flags.x == 1u) {
+            ivec2 lo = min(min(p.ab.xy,p.ab.zw),min(p.cd.xy,p.cd.zw));
+            ivec2 hi = max(max(p.ab.xy,p.ab.zw),max(p.cd.xy,p.cd.zw));
+            if (any(lessThan(xy,lo)) || any(greaterThan(xy,hi)) || !quadUV(p,xy,uv)) continue;
+            textured = (p.flags.y & 15u) == 2u;
+            if (textured) source = clamp(ivec2(uv*dvec2(p.tex.yz)),ivec2(0),ivec2(p.tex.yz)-1);
+        } else if (p.flags.x == 0u) {
+            ivec2 local = xy - p.ab.xy;
+            if (any(lessThan(local,ivec2(0))) || any(greaterThanEqual(local,p.ab.zw))) continue;
+            textured = true;
+            source = local * ivec2(p.tex.yz) / p.ab.zw;
+            uv.x = p.ab.z == 1 ? 0.0 : double(local.x)/double(p.ab.z-1);
+            uv.y = p.ab.w == 1 ? 0.0 : double(local.y)/double(p.ab.w-1);
+        } else {
+            if (any(lessThan(xy,p.ab.xy)) || any(greaterThan(xy,p.ab.zw)) || color == 0u) continue;
+            destination = color; continue;
+        }
+        if (textured) {
+            if ((p.flags.y & 0x10u) != 0u) source.x = int(p.tex.y)-source.x-1;
+            if ((p.flags.y & 0x20u) != 0u) source.y = int(p.tex.z)-source.y-1;
+            color = sampleTexture(p,source);
+        }
+        if ((color == 0u && (p.flags.z & 0x40u) == 0u) ||
+            ((p.flags.z & 0x100u) != 0u && ((xy.x+xy.y)&1) != 0)) continue;
+        if ((color & 0x8000u) != 0u && (p.flags.z & 4u) != 0u) {
+            uint shade = shadeAt(p,uv);
+            uint shaded = 0x8000u;
+            for (uint shift=0u; shift<=10u; shift+=5u) {
+                int component = int((color>>shift)&31u) + int((shade>>shift)&31u) - 16;
+                shaded |= uint(clamp(component,0,31)) << shift;
+            }
+            color = shaded;
+        }
+        switch (p.flags.z & 3u) {
+        case 1u:
+            if ((destination & 0x8000u) == 0u) continue;
+            color = 0x8000u | halfColor(destination); break;
+        case 2u:
+            if ((color & 0x8000u) != 0u) color = 0x8000u | halfColor(color); break;
+        case 3u:
+            if ((color & destination & 0x8000u) != 0u)
+                color = 0x8000u | (halfColor(color) + halfColor(destination)); break;
+        }
+        if ((p.flags.z & 0x8000u) != 0u) color |= 0x8000u;
+        destination = color;
+    }
+    pixels[outputIndex] = destination;
+}

@@ -1,0 +1,29 @@
+# CMake and generated build output
+/build/
+/build_asan/
+/build-*/
+/cmake-build-*/
+/rust/target/
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+Testing/
+
+# IDE and editor state
+.idea/
+.vscode/
+*.user
+*.suo
+*.vcxproj.user
+
+# Native binaries and debugging output
+*.exe
+*.dll
+*.pdb
+*.a
+*.lib
+*.obj
+*.o
+
+# Python diagnostic caches
+__pycache__/

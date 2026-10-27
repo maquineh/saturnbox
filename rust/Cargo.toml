@@ -1,0 +1,3 @@
+[workspace]
+members = ["saturn-disc"]
+resolver = "2"
