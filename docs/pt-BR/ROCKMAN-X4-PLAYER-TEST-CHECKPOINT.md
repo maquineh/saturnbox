@@ -16,8 +16,11 @@ capturas por F8 ou pedido externo durante a jogatina. O
 [probe SCSP](SCSP-DRIVER-PROBE.md) já executa o driver real com IRQs de timer e
 processa um pedido de volume. A implementação posterior acrescentou slots PCM,
 envelopes e o modo `--scsp-driver`; o boot de 25M pela ISO produziu áudio com
-27 key-ons e erro SDK zero. A validação de tiros/WARNING/explosões e DSP
-continua pendente.
+27 key-ons e erro SDK zero. Em 28/10 entraram noise, LFO de pitch/amplitude,
+modulação de fase, o DSP de efeitos com linha de atraso na RAM de som e o
+relógio de áudio por passo do scheduler. A validação auditiva de
+tiros/WARNING/explosões e das vozes na fase continua pendente; os testes provam
+a síntese, não a fidelidade de um efeito nomeado.
 
 Atualização de 19/10: a rota curta seleciona X, pede `ST00_0_X.BIN` em FAD
 12965 e chega à primeira cena da fase. O replay corrigido terminou em 108M,
@@ -1611,3 +1614,25 @@ Artefatos: `build/tmp/x4-player-position-20261027-run1.csv` (22 amostras),
 `build/rockman/player-route-20261027-run1-module.cpp`. O movimento programado
 está confirmado. O teste posterior com controle ao vivo também foi realizado;
 ver o [diagnóstico da sessão](ROCKMAN-X4-LIVE-GLITCH-AUDIT.md).
+
+### Efeitos, vozes e sincronismo do SCSP (2026-10-28)
+
+O caminho de áudio ganhou as fontes que faltavam para efeitos e vozes:
+
+- noise interno (`SSCTL=1`) com LFSR determinístico de 16 bits;
+- LFO de pitch (até 494 cents) e de amplitude (até 24 dB) com as quatro formas
+  de onda do chip;
+- modulação de fase entre slots pelo ring buffer de 64 saídas recentes;
+- DSP de efeitos completo (128 passos, 24 bits) com a linha de atraso na própria
+  RAM de som, envio por `ISEL`/`IMXL` e retorno por `EFSDL`/`EFPAN`.
+
+O sincronismo mudou de um bloco por quadro para um passo do scheduler: o
+`ScuEventScheduler` informa os passos por quadro e o runtime renderiza a fração
+de amostras devida em cada passo, publicando o quadro completo no VBlank. Com
+14.000 passos por quadro, a ordem entre o 68000, os comandos da mailbox e as
+escritas de registrador da SH-2 deixa de ter granularidade de um quadro.
+
+Isso ainda não prova que um tiro, um dash ou uma voz específica soe como no
+console: falta identificar o programa de DSP que o `SDDRVS.TSK` carrega,
+decodificar os eventos das sequências e comparar o áudio na fase. Detalhes,
+ganhos e pendências estão em [SCSP-DRIVER-PROBE.md](SCSP-DRIVER-PROBE.md).

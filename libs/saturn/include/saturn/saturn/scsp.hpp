@@ -74,9 +74,16 @@ public:
         std::array<std::uint32_t, 4> lastPcmStart{};
         std::uint64_t driverCycles{}, driverResets{}, driverRegisterWrites{};
         std::uint32_t driverPc{};
+        std::uint32_t slotMask{}; // Bit per sounding slot, for voice triage.
         std::uint64_t driverUnmappedReads{}, driverUnmappedWrites{}, slotKeyOns{}, slotKeyOffs{};
-        std::uint64_t unsupportedDspSamples{}, unsupportedLfoSamples{}, unsupportedFmSamples{};
+        // Sound sources the earlier model counted as unsupported are now
+        // synthesized; these counters show how often each path is used.
+        std::uint64_t noiseSamples{}, pitchLfoSamples{}, amplitudeLfoSamples{};
+        std::uint64_t fmSamples{}, dspSendSamples{}, dspEffectSamples{}, dspSteps{};
         std::uint64_t unsupportedSourceSamples{}, slotOutOfRangeSamples{};
+        // Sub-frame audio clock: one tick per scheduler step, and the number of
+        // samples rendered ahead of the VBlank that publishes the frame.
+        std::uint64_t audioBlockTicks{}, audioSubFrameSamples{};
     };
 
     // Optional real 68000 + hardware slot path. Must be selected before
@@ -105,6 +112,14 @@ public:
     // Real-time frontends let the audio sample clock follow elapsed host time
     // so a slow video frame does not stretch the music timeline.
     void setRealtimeAudioClock(bool enabled) noexcept;
+    // Deterministic mode renders the frame's samples across the scheduler
+    // steps instead of one burst at VBlank, so SH-2 register writes, mailbox
+    // commands and the sound CPU interleave within a frame. The scheduler
+    // reports its step count per frame; zero keeps the former VBlank burst.
+    void setAudioFrameBlocks(std::size_t blocksPerFrame) noexcept;
+    // One scheduler step of sound time. Called by the event scheduler, or by
+    // tests that drive the audio clock directly.
+    void onBlockTick();
 
     [[nodiscard]] const Stats& stats() const noexcept;
 
@@ -115,6 +130,9 @@ private:
     static void writeBytes(std::vector<std::uint8_t>& memory, std::size_t offset,
                            std::uint8_t width, std::uint32_t value) noexcept;
     void renderAudioFrame(std::size_t samplesPerChannel);
+    void beginAudioFrame(std::size_t samplesPerChannel);
+    void renderSamples(std::size_t count);
+    void finishAudioFrame();
     void serviceSoundCommands();
     struct DriverBackend;
     std::unique_ptr<DriverBackend> driver_;
@@ -162,6 +180,13 @@ private:
     bool realtimeAudioClock_{};
     std::chrono::steady_clock::time_point lastAudioTime_{};
     double fractionalAudioSamples_{};
+    // Sub-frame clock state. `audioFrameOpen_` guards a partially rendered
+    // frame between the first scheduler step after VBlank and the VBlank that
+    // publishes it.
+    std::size_t audioFrameBlocks_{};
+    std::size_t frameBlockCount_{};
+    std::size_t frameSampleCount_{};
+    bool audioFrameOpen_{};
 };
 
 } // namespace saturn::platform

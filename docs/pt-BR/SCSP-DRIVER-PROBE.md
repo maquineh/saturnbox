@@ -124,9 +124,116 @@ não o combate na fase.
 
 ### Limites do recorte
 
-DSP, FM, LFO e noise não são sintetizados. Os pedidos não suportados são
-contabilizados por slot/amostra; noise produz silêncio. A execução do 68000
-ocorre em lotes durante o VBlank do runtime, portanto a interação com pedidos
-SH-2 ainda tem granularidade de um frame, em vez de ciclo a ciclo. Os sons
-específicos de gameplay e o sincronismo precisam de validação na fase com o
-debugger/OBS; não estão todos declarados corrigidos.
+DSP, FM, LFO e noise passaram a ser sintetizados em 28/10 (ver abaixo). O
+controle MIDI e a DMA do SCSP continuam fora do modelo. A execução do 68000
+avança a cada amostra de 44,1 kHz desde a versão anterior; o que mudou agora é
+o **quando** o relógio de áudio avança no runtime, não a razão ciclos/amostra.
+Os sons específicos de gameplay e o sincronismo ainda precisam de validação
+audível na fase com o debugger; os testes provam a síntese, não a fidelidade
+de um efeito nomeado.
+
+## Efeitos, vozes e sincronismo (28/10/2026)
+
+Esta etapa acrescenta as fontes de som que o modelo anterior contava como
+ausentes e muda o relógio de áudio para o mesmo quantum do scheduler.
+
+### Noise, LFO e modulação de fase
+
+- **Noise (`SSCTL=1`)**: `ScspSynth::nextNoise` usa um xorshift de 16 bits
+  determinístico, reiniciado com o chip. O manual Sega não documenta os taps do
+  LFSR e o MAME usa o RNG do host como aproximação; aqui o objetivo é ser
+  reprodutível entre execuções. Os bits de inversão `SBCTL` continuam aplicados.
+  `SSCTL=2` permanece silêncio especificado e `SSCTL=3` continua contado em
+  `unsupportedSourceSamples` por ser marcado como inutilizável pelo manual.
+- **LFO**: `PLFOS`/`ALFOS`, as quatro formas (saw, square, triangle, noise), as
+  32 taxas, os 494 cents de profundidade de pitch e os 24 dB de amplitude vêm do
+  MAME. O passo de fase inteiro trunca as taxas mais baixas (0,17–0,35 Hz) para
+  zero, como no MAME; essa limitação foi preservada de propósito. `LFORE`
+  reinicia a fase no key-on e, sem ele, o oscilador continua livre.
+- **Modulação de fase (FM)**: `MDL`/`MDXSL`/`MDYSL` leem o ring buffer de 64
+  entradas com as saídas recentes dos slots, atenuadas por TL como no MAME, e
+  somam o desvio ao endereço de leitura. O acumulador de posição e os limites
+  `LSA`/`LEA` não são afetados, então o loop continua coerente.
+
+### DSP de efeitos
+
+`libs/saturn/src/scsp_dsp.cpp` porta o `scspdsp.cpp` do MAME: programa de 128
+passos em 24 bits, 64 coeficientes (`0x700`), 32 palavras de endereço
+(`0x780`), programa (`0x800`–`0xBFF`), linha de atraso em 128 posições e 16
+registradores de efeito. A escrita em `0xBF0` deixa o DSP fora de `stopped` e
+recalcula o último passo não nulo do programa. `TEMP`, `MEMS`, `MIXS`, `EFREG` e
+`EXTS` voltam por leitura em `0xE00`–`0xEE3`.
+
+A memória de atraso fica na **RAM de som**, endereçada por `RBP`/`RBL`
+(`0x402`), e por isso `ScspSynth::renderSample` agora recebe a RAM como
+gravável. O caminho de ganho segue o MAME: envio por slot
+`amostra16 × 16 × TL × IMXL`, acumulado em `MIXS[ISEL]`, e retorno dos
+`EFREG[0..15]` somado à saída pelos `EFSDL`/`EFPAN` dos slots 0–15. Quando a
+imagem de RAM for menor que 512 KiB, o DSP limita os acessos ao tamanho real e
+conta as escritas descartadas em `droppedWrites`; sem isso, um endereço de
+atraso poderia sair do buffer nos testes.
+
+### Sincronismo por passo do scheduler
+
+Antes, `onVBlank` renderizava as 735 amostras de um quadro de uma vez. Isso
+significava que todo o 68000 de um quadro rodava em um único bloco, e que toda
+escrita da SH-2 em registradores de slot só era vista no quadro seguinte.
+
+Agora `ScuEventScheduler::beforeBlock` informa `setAudioFrameBlocks` e chama
+`onBlockTick` no mesmo ponto em que conta o tempo do quadro. `onBlockTick`
+renderiza a fração de amostras devida por passo (`735 / passos-por-quadro`) em
+um buffer de quadro, e `onVBlank` completa e publica o quadro. Com o padrão de
+14.000 passos por quadro, cada passo renderiza cerca de 0,05 amostra, então a
+ordem entre execução do 68000, comandos da mailbox e escritas de registrador da
+SH-2 passa a ser sub-quadro em vez de um quadro inteiro. O clock em tempo real
+continua seguindo o tempo do host e ignora esse caminho.
+
+A contagem continua em 735 amostras por quadro e os testes existentes de
+`onVBlank` seguem passando porque o caminho antigo permanece quando nenhum
+passo por quadro é configurado.
+
+Contadores novos em `ScspRuntime::Stats`: `noiseSamples`, `pitchLfoSamples`,
+`amplitudeLfoSamples`, `fmSamples`, `dspSendSamples`, `dspEffectSamples`,
+`dspSteps`, `audioBlockTicks`, `audioSubFrameSamples` e `slotMask` (um bit por
+slot soando, para separar música, efeito e voz). O debugger ao vivo e o probe
+publicam todos.
+
+### Testes desta etapa
+
+`tests/scsp_synth_tests.cpp` e `tests/scsp_driver_tests.cpp` cobrem: noise
+audível e `SSCTL=3` silencioso; LFO de pitch alterando a posição e LFO de
+amplitude variando o nível; modulação de fase pelo ring buffer; envio ao DSP com
+retorno em `EFREG` (saída apenas pelo efeito, com `DISDL=0`); escrita da linha de
+atraso em `word 0x100` da RAM de som; e o relógio de áudio adiantando amostras
+dentro do quadro, com o key-on feito no meio dele. No modo `--scsp-driver`, um
+teste adicional confirma que o 68000 executa durante os passos, não só no
+VBlank.
+
+### Execução no probe com dados reais (28/10/2026)
+
+Com o dump `scsp_ram.bin` da captura de fase e `--replay-pending --mark-loaded`,
+10 milhões de ciclos reproduziram a fixture conhecida: 2 key-ons, 2 vozes ativas,
+bitmap de erro do driver em `0x420` igual a zero, 39.062 amostras e um WAV com
+pico de 22.373 (68% da escala) e RMS de 9,89% da escala, portanto não silencioso.
+
+Nessa execução o driver fez 1.024 escritas na janela do DSP, **todas com valor
+zero**, e nenhum slot usou noise, LFO ou modulação: `dsp_steps=0`,
+`noise_samples=0`, `pitch_lfo_samples=0`, `fm_samples=0`. O `SDDRVS.TSK` desta
+captura limpa a área do programa do DSP, mas não carrega um programa de efeito, e
+as vozes observadas vêm de slots PCM diretos. Isso delimita a conclusão: o DSP
+está implementado e coberto por testes sintéticos, porém o áudio capturado do X4
+não depende dele. O que falta para tiro, explosão e voz não é o DSP, e sim
+decodificar e acionar as sequências corretas (comando `01` e eventos comprimidos)
+e validar o som na fase.
+
+### Pendências
+
+- Identificar o programa de DSP que o driver `SDDRVS.TSK` realmente carrega e se
+  os efeitos/vozes do X4 passam por ele ou só pelos slots diretos.
+- Decodificar os eventos das sequências e confirmar auditivamente tiro, dash,
+  WARNING e explosão na fase.
+- Medir se noise/LFO aparecem nos bancos usados pelo jogo, em vez de só nos
+  testes sintéticos.
+- O interleaving ainda é por passo do scheduler, não por ciclo do 68000; a
+  granularidade é muito menor que um quadro, mas não é ciclo a ciclo.
+- MIDI e DMA do SCSP continuam não implementados.

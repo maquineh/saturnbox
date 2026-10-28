@@ -373,8 +373,52 @@ void ScspRuntime::serviceSoundCommands() {
     }
 }
 
+void ScspRuntime::setAudioFrameBlocks(std::size_t blocksPerFrame) noexcept {
+    if (audioFrameBlocks_ == blocksPerFrame) return;
+    audioFrameBlocks_ = blocksPerFrame;
+    // A period change drops any partially rendered frame; the next VBlank or
+    // block tick starts a fresh one.
+    audioFrameOpen_ = false;
+    frameBlockCount_ = 0;
+    frameSampleCount_ = 0;
+}
+
+void ScspRuntime::onBlockTick() {
+    if (audioFrameBlocks_ == 0U || realtimeAudioClock_) return;
+    constexpr auto kSamplesPerVideoFrame = kAudioSampleRate / 60U;
+    if (!audioFrameOpen_) {
+        beginAudioFrame(kSamplesPerVideoFrame);
+        audioFrameOpen_ = true;
+        frameBlockCount_ = 0;
+    }
+    ++frameBlockCount_;
+    // Spread the frame evenly over the scheduler steps. Rounding down keeps a
+    // step from rendering past its own share; the VBlank finishes the frame.
+    const auto due = std::min<std::size_t>(
+        (frameBlockCount_ * kSamplesPerVideoFrame) / audioFrameBlocks_,
+        kSamplesPerVideoFrame);
+    if (due > frameSampleCount_) {
+        const auto count = due - frameSampleCount_;
+        renderSamples(count);
+        stats_.audioSubFrameSamples += count;
+    }
+    ++stats_.audioBlockTicks;
+}
+
 void ScspRuntime::onVBlank() {
     constexpr auto kSamplesPerVideoFrame = kAudioSampleRate / 60U;
+    if (audioFrameBlocks_ != 0U && !realtimeAudioClock_) {
+        if (!audioFrameOpen_) {
+            beginAudioFrame(kSamplesPerVideoFrame);
+            renderSamples(kSamplesPerVideoFrame);
+        } else if (frameSampleCount_ < kSamplesPerVideoFrame) {
+            renderSamples(kSamplesPerVideoFrame - frameSampleCount_);
+        }
+        finishAudioFrame();
+        audioFrameOpen_ = false;
+        frameBlockCount_ = 0;
+        return;
+    }
     if (!realtimeAudioClock_) {
         renderAudioFrame(kSamplesPerVideoFrame);
         return;
@@ -419,38 +463,35 @@ void ScspRuntime::setRealtimeAudioClock(bool enabled) noexcept {
 }
 
 void ScspRuntime::renderAudioFrame(std::size_t samplesPerChannel) {
+    beginAudioFrame(samplesPerChannel);
+    renderSamples(samplesPerChannel);
+    finishAudioFrame();
+}
+
+void ScspRuntime::beginAudioFrame(std::size_t samplesPerChannel) {
     lastAudioFrame_.sampleRate = kAudioSampleRate;
     lastAudioFrame_.channels = kAudioChannels;
     lastAudioFrame_.sequence = ++audioSequence_;
     lastAudioFrame_.samples.assign(samplesPerChannel * kAudioChannels, 0.0F);
+    frameSampleCount_ = 0;
+}
+
+void ScspRuntime::renderSamples(std::size_t count) {
+    const auto offset = frameSampleCount_ * kAudioChannels;
+    if (count == 0U || offset + count * kAudioChannels > lastAudioFrame_.samples.size()) return;
     if (driver_) {
-        for (std::size_t sample = 0; sample < samplesPerChannel; ++sample) {
+        for (std::size_t sample = 0; sample < count; ++sample) {
             const auto stereo = driver_->renderSample();
-            lastAudioFrame_.samples[sample * 2U] = stereo[0];
-            lastAudioFrame_.samples[sample * 2U + 1U] = stereo[1];
+            lastAudioFrame_.samples[offset + sample * 2U] = stereo[0];
+            lastAudioFrame_.samples[offset + sample * 2U + 1U] = stereo[1];
         }
-        stats_.activeVoices = static_cast<std::uint32_t>(driver_->synth.activeVoiceCount());
-        const auto& slots = driver_->synth.stats();
-        stats_.slotKeyOns = slots.keyOns;
-        stats_.slotKeyOffs = slots.keyOffs;
-        stats_.unsupportedDspSamples = slots.unsupportedDspSamples;
-        stats_.unsupportedLfoSamples = slots.unsupportedLfoSamples;
-        stats_.unsupportedFmSamples = slots.unsupportedFmSamples;
-        stats_.unsupportedSourceSamples = slots.unsupportedSourceSamples;
-        stats_.slotOutOfRangeSamples = slots.outOfRangeSamples;
-        ++stats_.audioFrames;
-        stats_.audioSamples += samplesPerChannel;
-        audioPending_ = true;
-        if (audioSink_) audioSink_(lastAudioFrame_);
+        frameSampleCount_ += count;
         return;
     }
-    std::uint32_t active{};
-    for (const auto& voice : voices_) active += voice.active ? 1U : 0U;
-    for (const auto& stream : pcmStreams_) active += stream.active ? 1U : 0U;
     // Each MVOL decrement halves amplitude; zero mutes output, not the clock.
     const auto masterGain = masterVolume_ == 0U ? 0.0F :
         std::ldexp(1.0F, static_cast<int>(masterVolume_) - 15);
-    for (std::size_t sample = 0; sample < samplesPerChannel; ++sample) {
+    for (std::size_t sample = 0; sample < count; ++sample) {
         float left{};
         float right{};
         for (auto& voice : voices_) {
@@ -509,23 +550,47 @@ void ScspRuntime::renderAudioFrame(std::size_t samplesPerChannel) {
             stream.position = (stream.position + stream.step) %
                 (static_cast<std::uint64_t>(stream.samples) << 16U);
         }
-        lastAudioFrame_.samples[sample * 2U] = std::clamp(left * masterGain, -1.0F, 1.0F);
-        lastAudioFrame_.samples[sample * 2U + 1U] = std::clamp(right * masterGain, -1.0F, 1.0F);
+        lastAudioFrame_.samples[offset + sample * 2U] = std::clamp(left * masterGain, -1.0F, 1.0F);
+        lastAudioFrame_.samples[offset + sample * 2U + 1U] = std::clamp(right * masterGain, -1.0F, 1.0F);
     }
-    const auto host = static_cast<std::size_t>(readBytes(ram_, 0x404U, 4U));
-    if (host >= 0x500U && host <= ram_.size() - 0x100U) {
-        for (std::size_t number = 0; number < pcmStreams_.size(); ++number) {
-            const auto& stream = pcmStreams_[number];
-            if (!stream.active) continue;
-            const auto position = static_cast<std::uint8_t>(stream.position >> 28U);
-            auto& status = ram_[host + 0xA0U + number * 2U];
-            if (status != position) ++stats_.pcmStatusUpdates;
-            status = position;
+    frameSampleCount_ += count;
+}
+
+void ScspRuntime::finishAudioFrame() {
+    if (driver_) {
+        stats_.activeVoices = static_cast<std::uint32_t>(driver_->synth.activeVoiceCount());
+        const auto& slots = driver_->synth.stats();
+        stats_.slotKeyOns = slots.keyOns;
+        stats_.slotKeyOffs = slots.keyOffs;
+        stats_.slotMask = slots.activeSlotMask;
+        stats_.noiseSamples = slots.noiseSamples;
+        stats_.pitchLfoSamples = slots.pitchLfoSamples;
+        stats_.amplitudeLfoSamples = slots.amplitudeLfoSamples;
+        stats_.fmSamples = slots.fmSamples;
+        stats_.dspSendSamples = slots.dspSendSamples;
+        stats_.dspEffectSamples = slots.dspEffectSamples;
+        stats_.dspSteps = driver_->synth.dsp().stats().steps;
+        stats_.unsupportedSourceSamples = slots.unsupportedSourceSamples;
+        stats_.slotOutOfRangeSamples = slots.outOfRangeSamples;
+    } else {
+        std::uint32_t active{};
+        for (const auto& voice : voices_) active += voice.active ? 1U : 0U;
+        for (const auto& stream : pcmStreams_) active += stream.active ? 1U : 0U;
+        stats_.activeVoices = active;
+        const auto host = static_cast<std::size_t>(readBytes(ram_, 0x404U, 4U));
+        if (host >= 0x500U && host <= ram_.size() - 0x100U) {
+            for (std::size_t number = 0; number < pcmStreams_.size(); ++number) {
+                const auto& stream = pcmStreams_[number];
+                if (!stream.active) continue;
+                const auto position = static_cast<std::uint8_t>(stream.position >> 28U);
+                auto& status = ram_[host + 0xA0U + number * 2U];
+                if (status != position) ++stats_.pcmStatusUpdates;
+                status = position;
+            }
         }
     }
-    stats_.activeVoices = active;
     ++stats_.audioFrames;
-    stats_.audioSamples += samplesPerChannel;
+    stats_.audioSamples += frameSampleCount_;
     audioPending_ = true;
     if (audioSink_) audioSink_(lastAudioFrame_);
 }

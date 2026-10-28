@@ -20,6 +20,58 @@ void smpcControlsTheSoundCpu() {
     REQUIRE(!mmio.smpc().soundCpuEnabled());
 }
 
+void audioClockFollowsSchedulerBlocks() {
+    using Sound = saturn::platform::ScspRuntime;
+    Sound sound;
+    // One scheduler step per sample: 735 steps fill a 60 Hz frame.
+    sound.setAudioFrameBlocks(735);
+    REQUIRE(sound.write(Sound::kRegistersBase + 0x04U, 2, 0U));    // Voice 0 volume.
+    REQUIRE(sound.write(Sound::kRegistersBase + 0x00U, 2, 0x0700U)); // Voice 0 pitch.
+    for (int step = 0; step < 100; ++step) sound.onBlockTick();
+    Sound::AudioFrame frame;
+    // Nothing is published until the VBlank that closes the frame.
+    REQUIRE(!sound.consumeAudio(frame));
+    REQUIRE(sound.write(Sound::kKeyOn, 2, 0x0001U)); // Key on mid-frame.
+    for (int step = 0; step < 100; ++step) sound.onBlockTick();
+    sound.onVBlank();
+    REQUIRE(sound.consumeAudio(frame));
+    REQUIRE(frame.samples.size() == 735U * 2U);
+    // Audio written before the key-on is silence: the clock advanced inside
+    // the frame instead of rendering the whole frame in one burst.
+    for (std::size_t sample = 0; sample < 100; ++sample) {
+        REQUIRE(frame.samples[sample * 2U] == 0.0F);
+        REQUIRE(frame.samples[sample * 2U + 1U] == 0.0F);
+    }
+    auto audible = false;
+    for (std::size_t sample = 200; sample < 735; ++sample) {
+        if (std::abs(frame.samples[sample * 2U]) > 0.001F) audible = true;
+    }
+    REQUIRE(audible);
+    REQUIRE(sound.stats().audioBlockTicks == 200U);
+    REQUIRE(sound.stats().audioSubFrameSamples == 200U);
+    REQUIRE(sound.stats().audioFrames == 1U);
+    REQUIRE(sound.stats().audioSamples == 735U);
+}
+
+#ifdef SATURNBOX_HAS_M68K
+void soundCpuRunsInsideTheFrame() {
+    using Sound = saturn::platform::ScspRuntime;
+    Sound sound;
+    REQUIRE(sound.enableDriverCpu());
+    REQUIRE(sound.write(Sound::kRamBase, 4, 0x8000U));
+    REQUIRE(sound.write(Sound::kRamBase + 4U, 4, 0x100U));
+    // NOP; STOP #0x2700 keeps the sound CPU idle while the clock runs.
+    REQUIRE(sound.write(Sound::kRamBase + 0x100U, 4, 0x4E712700U));
+    sound.setSoundCpuEnabled(true);
+    sound.setAudioFrameBlocks(735);
+    for (int step = 0; step < 100; ++step) sound.onBlockTick();
+    REQUIRE(sound.stats().driverResets == 1U);
+    REQUIRE(sound.stats().driverCycles >= 100U * 256U);
+    sound.onVBlank();
+    REQUIRE(sound.stats().audioFrames == 1U);
+}
+#endif
+
 #ifdef SATURNBOX_HAS_M68K
 void invalidResetVectorsFailWithoutAcknowledgingCommands() {
     using Sound = saturn::platform::ScspRuntime;
@@ -103,7 +155,9 @@ void realDriverWritesSlotsAndProducesPcm() {
 
 void registerScspDriverTests(test::Registry& registry) {
     registry.add("SCSP: SMPC sound CPU on and off", smpcControlsTheSoundCpu);
+    registry.add("SCSP: audio clock advances with scheduler blocks", audioClockFollowsSchedulerBlocks);
 #ifdef SATURNBOX_HAS_M68K
+    registry.add("SCSP: sound CPU executes inside the audio frame", soundCpuRunsInsideTheFrame);
     registry.add("SCSP: invalid reset vectors report an error and can recover", invalidResetVectorsFailWithoutAcknowledgingCommands);
     registry.add("SCSP: real 68000 configures slots and emits PCM", realDriverWritesSlotsAndProducesPcm);
 #endif

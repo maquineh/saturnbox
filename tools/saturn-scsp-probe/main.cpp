@@ -43,7 +43,8 @@ void writePcm16(std::ostream& output, const std::array<float, 2>& sample) {
 }
 
 // Bounded offline driver execution. This bus preserves register writes for
-// inspection. Optional WAV output renders basic PCM voices; DSP is not rendered.
+// inspection. Optional WAV output renders the PCM slots, the noise source, the
+// LFOs, slot modulation and the effect DSP into the same sound-RAM image.
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "usage: saturn-scsp-probe <driver-or-sound-ram.bin> [cycles=1000000] [register-writes.csv] [--no-timers|--test-master-volume|--replay-pending] [--mark-loaded] [--dump-final-ram PATH] [--dump-registers PATH] [--wav PATH]\n";
@@ -290,12 +291,18 @@ int main(int argc, char** argv) {
                   << " active_voices=" << synth.activeVoiceCount()
                   << " unmapped_reads=" << unmappedReads << " unmapped_writes=" << unmappedWrites
                   << " timer_b_events=" << timing.stats().timers[1].expirations
-                  << "\nDSP synthesis is not implemented in this probe.\n";
+                  << " dsp_steps=" << synth.dsp().stats().steps
+                  << " dsp_last_step=" << static_cast<unsigned>(synth.dsp().lastStep())
+                  << "\n";
         if (wavPath) {
             const auto& stats = synth.stats();
             std::cout << "wav=" << wavPath->string() << " samples=" << stats.renderedSamples
-                      << " unsupported_dsp_samples=" << stats.unsupportedDspSamples
-                      << " unsupported_lfo_samples=" << stats.unsupportedLfoSamples
+                      << " noise_samples=" << stats.noiseSamples
+                      << " pitch_lfo_samples=" << stats.pitchLfoSamples
+                      << " amplitude_lfo_samples=" << stats.amplitudeLfoSamples
+                      << " fm_samples=" << stats.fmSamples
+                      << " dsp_send_samples=" << stats.dspSendSamples
+                      << " dsp_effect_samples=" << stats.dspEffectSamples
                       << " out_of_range_samples=" << stats.outOfRangeSamples << '\n';
         }
         const auto hostAfter = read(0x404U, 4U);

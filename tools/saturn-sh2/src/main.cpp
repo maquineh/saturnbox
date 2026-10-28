@@ -5895,8 +5895,12 @@ int boot(const Arguments& arguments) {
         stats << "frames=" << sound.audioFrames << ";samples=" << sound.audioSamples
               << ";voices=" << sound.activeVoices << ";pcm_starts=" << sound.pcmStarts
               << ";driver_cycles=" << sound.driverCycles << ";driver_pc=" << sound.driverPc;
-        stats << ";slot_key_ons=" << sound.slotKeyOns << ";dsp_samples=" << sound.unsupportedDspSamples
-              << ";lfo_samples=" << sound.unsupportedLfoSamples << ";fm_samples=" << sound.unsupportedFmSamples;
+        stats << ";slot_key_ons=" << sound.slotKeyOns << ";slot_mask=" << std::hex
+              << sound.slotMask << std::dec << ";noise_samples=" << sound.noiseSamples
+              << ";plfo_samples=" << sound.pitchLfoSamples << ";alfo_samples=" << sound.amplitudeLfoSamples
+              << ";fm_samples=" << sound.fmSamples << ";dsp_send=" << sound.dspSendSamples
+              << ";dsp_effect=" << sound.dspEffectSamples << ";audio_blocks=" << sound.audioBlockTicks
+              << ";audio_ahead=" << sound.audioSubFrameSamples;
         for (const auto command : {0x01U, 0x05U, 0x08U, 0x0EU, 0x85U, 0x86U, 0x87U, 0x8AU})
             stats << ";cmd_" << std::hex << command << '=' << std::dec << sound.soundCommands[command];
         if (realtime) {
@@ -7223,11 +7227,17 @@ int boot(const Arguments& arguments) {
                   << saturn::sh2::formatAddress(scspStats.driverPc)
                   << ", resets=" << scspStats.driverResets << ", register-writes=" << scspStats.driverRegisterWrites
                   << ", key-ons=" << scspStats.slotKeyOns << ", key-offs=" << scspStats.slotKeyOffs
+                  << ", slot-mask=" << saturn::sh2::formatAddress(scspStats.slotMask)
                   << ", unmapped=" << scspStats.driverUnmappedReads << '/' << scspStats.driverUnmappedWrites
                   << ", unsupported-source=" << scspStats.unsupportedSourceSamples
-                  << ", unsupported-dsp=" << scspStats.unsupportedDspSamples
-                  << ", unsupported-lfo=" << scspStats.unsupportedLfoSamples
-                  << ", unsupported-fm=" << scspStats.unsupportedFmSamples
+                  << ", noise=" << scspStats.noiseSamples
+                  << ", pitch-lfo=" << scspStats.pitchLfoSamples
+                  << ", amplitude-lfo=" << scspStats.amplitudeLfoSamples
+                  << ", fm=" << scspStats.fmSamples
+                  << ", dsp-steps=" << scspStats.dspSteps
+                  << ", dsp-send=" << scspStats.dspSendSamples
+                  << ", dsp-effect=" << scspStats.dspEffectSamples
+                  << ", audio-blocks=" << scspStats.audioBlockTicks
                   << ", out-of-range=" << scspStats.slotOutOfRangeSamples
                   << ", sdk-error-bits=" << saturn::sh2::formatAddress(mmio.scsp().read(
                         saturn::platform::ScspRuntime::kRamBase + 0x420U, 4U).value_or(0U)) << '\n';

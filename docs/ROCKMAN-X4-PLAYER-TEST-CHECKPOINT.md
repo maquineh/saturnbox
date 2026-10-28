@@ -24,7 +24,11 @@ The latest player-route evidence is from 2026-10-27:
   68000 driver, including timer IRQs and a verified volume command. The
   subsequent optional `--scsp-driver` backend adds direct PCM slots, envelopes
   and SMPC integration; a 25M-block ISO boot produced audio with 27 key-ons
-  and no SDK errors. Gameplay cue fidelity and DSP remain unvalidated.
+  and no SDK errors. On 2026-10-28 the internal noise source, the pitch and
+  amplitude LFOs, slot phase modulation and the effect DSP (delay memory in
+  sound RAM) were implemented, and the audio clock now advances per scheduler
+  step instead of once per VBlank. Gameplay cue fidelity and an audible
+  song/voice comparison remain unvalidated.
 - A recorded live-control session completed the introductory stage and
   advanced into Frost Kibatodos's stage. It confirmed accumulated player
   poses, localized striped sprite corruption, and user-reported pillar

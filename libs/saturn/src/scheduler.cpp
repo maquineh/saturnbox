@@ -98,6 +98,11 @@ std::optional<sir::InterruptRequest> ScuEventScheduler::beforeBlock(
         hasStep_ = true;
         lastStep_ = step;
         ++stats_.elapsedBlocks;
+        // Sound time advances with the same quantum as VBlank, so sound-CPU
+        // execution and SH-2 register writes interleave inside a frame
+        // instead of only at the frame boundary.
+        mmio.scsp().setAudioFrameBlocks(vblankPeriodBlocks_);
+        mmio.scsp().onBlockTick();
         if (vblankPeriodBlocks_ != 0U && ++periodCounter_ >= vblankPeriodBlocks_) {
             periodCounter_ = 0U;
             raiseVblank();

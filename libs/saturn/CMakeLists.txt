@@ -7,6 +7,7 @@ add_library(saturn_platform
     src/scheduler.cpp
     src/slave.cpp
     src/scsp.cpp
+    src/scsp_dsp.cpp
     src/scsp_timing.cpp
     src/scsp_synth.cpp
     src/smpc.cpp
