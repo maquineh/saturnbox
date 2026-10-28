@@ -204,7 +204,7 @@ bool ScspRuntime::write(core::Address address, std::uint8_t width,
                 for (std::size_t packet = host; packet < host + 0x80U; packet += 16U) {
                     if (ram_[packet] == 0U) continue;
                     if (driver_) ++stats_.soundCommands[ram_[packet]];
-                    if (ram_[packet] == 0x01U) recordSequenceRequest(packet);
+                    recordSequenceRequest(packet);
                 }
             }
         }
@@ -426,16 +426,17 @@ void ScspRuntime::advanceSoundCpu(std::uint64_t targetCycles, bool flush) {
 }
 
 void ScspRuntime::recordSequenceRequest(std::size_t packet) {
-    ++stats_.sequenceRequests;
-    if (stats_.lastSequenceRequests.size() >= Stats::kMaxSequenceRequests)
-        stats_.lastSequenceRequests.erase(stats_.lastSequenceRequests.begin());
+    ++stats_.soundRequests;
+    if (ram_[packet] == 0x01U) ++stats_.sequenceRequests;
+    if (stats_.lastSoundRequests.size() >= Stats::kMaxSoundRequests)
+        stats_.lastSoundRequests.erase(stats_.lastSoundRequests.begin());
     Stats::SequenceRequest request;
     request.schedulerTick = stats_.schedulerSteps;
     request.command = ram_[packet];
     request.control = ram_[packet + 2U];
     request.bank = ram_[packet + 3U];
     request.sequence = ram_[packet + 4U];
-    stats_.lastSequenceRequests.push_back(request);
+    stats_.lastSoundRequests.push_back(request);
 }
 
 void ScspRuntime::onBlockTick() {

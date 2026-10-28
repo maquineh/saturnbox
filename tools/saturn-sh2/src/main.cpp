@@ -7284,9 +7284,9 @@ int boot(const Arguments& arguments) {
         std::cout << "  audio output: " << arguments.audioOutput->string()
                   << (audioWriteFailure ? " (write-error)" : "") << '\n';
     }
-    // Sequence-start packets seen on the host mailbox, in order. Each row is a
-    // cue the game requested; the step column aligns it with scripted input and
-    // the captured audio.
+    // Sound command packets seen on the host mailbox, in order. Each row is a
+    // cue the game requested (0x01 starts a sequence, 0x08 loads a map, ...);
+    // the step column aligns it with scripted input and the captured audio.
     if (arguments.scspRequestsOutput) {
         std::ofstream requests(*arguments.scspRequestsOutput, std::ios::trunc);
         const auto& sound = mmio.scsp().stats();
@@ -7294,13 +7294,14 @@ int boot(const Arguments& arguments) {
             std::cout << "  SCSP requests: write-error\n";
         } else {
             requests << "step,command,control,bank,sequence\n";
-            for (const auto& request : sound.lastSequenceRequests)
+            for (const auto& request : sound.lastSoundRequests)
                 requests << request.schedulerTick << ',' << static_cast<unsigned>(request.command)
                          << ',' << static_cast<unsigned>(request.control)
                          << ',' << static_cast<unsigned>(request.bank)
                          << ',' << static_cast<unsigned>(request.sequence) << '\n';
-            std::cout << "  SCSP sequence requests: " << sound.sequenceRequests << " total, "
-                      << sound.lastSequenceRequests.size() << " recorded to "
+            std::cout << "  SCSP sound requests: " << sound.soundRequests << " total ("
+                      << sound.sequenceRequests << " sequence starts), "
+                      << sound.lastSoundRequests.size() << " recorded to "
                       << arguments.scspRequestsOutput->string() << '\n';
         }
     }

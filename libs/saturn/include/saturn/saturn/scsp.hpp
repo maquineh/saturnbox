@@ -71,7 +71,7 @@ public:
             std::uint8_t bank{};
             std::uint8_t sequence{};
         };
-        static constexpr std::size_t kMaxSequenceRequests = 4096;
+        static constexpr std::size_t kMaxSoundRequests = 16384;
         std::uint64_t schedulerTicks{};
         std::uint64_t requests{};
         std::uint64_t completions{};
@@ -91,8 +91,9 @@ public:
         // synthesized; these counters show how often each path is used.
         std::uint64_t noiseSamples{}, pitchLfoSamples{}, amplitudeLfoSamples{};
         std::uint64_t fmSamples{}, dspSendSamples{}, dspEffectSamples{}, dspSteps{};
-        std::uint64_t sequenceRequests{}; // Total 0x01 packets, even beyond the ring.
-        std::vector<SequenceRequest> lastSequenceRequests;
+        std::uint64_t sequenceRequests{}; // Only 0x01, even beyond the ring.
+        std::uint64_t soundRequests{};    // Every command packet, in the ring.
+        std::vector<SequenceRequest> lastSoundRequests;
         // Scheduler steps elapsed, the same unit --pad-sequence uses. Recorded
         // with each request so a capture can be aligned to scripted input.
         std::uint64_t schedulerSteps{};

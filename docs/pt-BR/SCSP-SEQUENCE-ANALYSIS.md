@@ -228,9 +228,12 @@ Resultado da execução (`status: step-limit`, 205.000.000 de blocos):
 | `noise` / `lfo` / `fm` / `dsp-steps` | 0 / 0 / 0 / 0 |
 | pedidos de sequência (`01`) | 424 |
 
-O `saturn-sh2` passou a gravar cada pacote `01` com o passo do scheduler
-(`--scsp-requests`), o que permite alinhar o pedido ao quadro de áudio: com
-14.000 passos por quadro e 735 amostras, o tempo é `passo / 840.000` s.
+O `saturn-sh2` passou a gravar cada pacote de comando com o passo do scheduler
+(`--scsp-requests`), não só o `01`: numa execução curta de 60M de blocos
+aparecem `08` (carregar mapa) 16×, `82` (volume) 5×, `85`/`86`/`87`/`8A` (PCM)
+9/10/4/3×, além de 28 `01`. O arquivo permite alinhar o pedido ao quadro de
+áudio: com 14.000 passos por quadro e 735 amostras, o tempo é `passo / 840.000`
+s. Os scripts de análise filtram `command = 0x01`, que é o que inicia sequência.
 
 ### Efeitos identificados pelo gatilho
 

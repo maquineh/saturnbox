@@ -36,8 +36,9 @@ void hostQueueSequenceRequestsAreRecorded() {
     REQUIRE(sound.write(Sound::kCommandStatus, 1, 0x80U));
     const auto& stats = sound.stats();
     REQUIRE(stats.sequenceRequests == 1U);
-    REQUIRE(stats.lastSequenceRequests.size() == 1U);
-    const auto& request = stats.lastSequenceRequests[0];
+    REQUIRE(stats.soundRequests == 1U);
+    REQUIRE(stats.lastSoundRequests.size() == 1U);
+    const auto& request = stats.lastSoundRequests[0];
     REQUIRE(request.command == 0x01U);
     REQUIRE(request.control == 3U);
     REQUIRE(request.bank == 2U);
