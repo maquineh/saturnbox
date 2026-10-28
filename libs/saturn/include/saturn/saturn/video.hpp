@@ -9,6 +9,7 @@
 #include <deque>
 #include <functional>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 namespace saturn::platform {
@@ -117,8 +118,9 @@ struct Vdp1CommandExecution {
     std::vector<Vdp1CommandTraceEntry> commands;
 };
 
-// Guest writes to the VDP1 texture page used by the glitchy X/Zero command
-// list. Context fields identify the SH-2 block that populated each byte range.
+// Guest writes to the VDP1 player texture page and control registers.
+// Register offsets start at 0x100000 relative to VDP1 VRAM. Context fields
+// identify the SH-2 block that populated each byte range.
 struct Vdp1MemoryWriteTraceEntry {
     std::size_t step{};
     core::Address blockAddress{};
@@ -128,6 +130,28 @@ struct Vdp1MemoryWriteTraceEntry {
     std::uint32_t offset{};
     std::uint8_t width{};
     std::uint32_t value{};
+};
+
+// Owned copy of existing state; composed can precede the current VDP1 phase.
+// Empty memory vectors mean captureDebugSnapshot(false) omitted those dumps.
+struct VideoDebugSnapshot {
+    VideoFrame composed;
+    std::array<std::vector<std::uint8_t>, 2> framebufferBanks;
+    std::vector<std::uint8_t> vdp1Vram, vdp2Vram, cram;
+    std::vector<std::uint8_t> vdp1Registers, vdp2Registers;
+    std::vector<Vdp1MemoryWriteTraceEntry> vdp1RegisterWriteHistory;
+    std::vector<Vdp1MemoryWriteTraceEntry> vdp1MemoryWriteHistory;
+    std::vector<Vdp1CommandExecution> vdp1CommandHistory;
+    std::size_t contextStep{};
+    core::Address contextBlock{}, contextCaller{};
+    std::uint64_t frameCount{}, compositionCount{};
+    std::uint16_t vdp1Tvmr{}, vdp1Fbcr{}, vdp1Ptmr{};
+    std::uint16_t vdp1Ewdr{}, vdp1Ewlr{}, vdp1Ewrr{};
+    std::uint16_t vdp1Edsr{}, vdp1Lopr{}, vdp1Copr{};
+    std::uint8_t vdp1DisplayBank{}, vdp1DrawBank{};
+    bool vdp1SwapPending{}, vdp1ErasePending{}, vdp1VblankErasePending{};
+    bool vdp1InVBlank{}, vdp1DrawEndPending{}, vdp1FramebufferConfigured{};
+    bool compositionDirty{}, framePending{};
 };
 
 // Snapshot emitted at a scheduler presentation boundary. Both VDP1 banks are
@@ -311,7 +335,7 @@ public:
     [[nodiscard]] bool write(core::Address address, std::uint8_t width,
                              std::uint32_t value);
 
-    void advanceFrame();
+    void advanceFrame(bool startAutomaticDraw = true);
     [[nodiscard]] std::uint64_t frameCount() const noexcept;
     [[nodiscard]] bool framePending() const noexcept;
     [[nodiscard]] const VideoFrame& lastFrame() const noexcept;
@@ -320,6 +344,15 @@ public:
     // may happen several times between VBlank edges; presentation is paced by
     // the scheduler and therefore must not be tied to every PTMR=1 draw.
     void presentFrame();
+    // Scheduler phases: the guest may request VBE between IN and OUT. Finish
+    // erase/change before the OUT handler clears VBE, then start PTMR=2 on
+    // the new draw bank and publish one host frame.
+    void onVBlankIn();
+    void onVBlankOut();
+    // Called synchronously on the emulation thread. The sink may capture a
+    // snapshot, but must not mutate/re-enter the video runtime or perform I/O.
+    void setDebugEventSink(std::function<void(std::string_view)> sink);
+    [[nodiscard]] VideoDebugSnapshot captureDebugSnapshot(bool includeMemory) const;
     void setFrameSink(VideoFrameSink sink);
     void setDiagnosticSink(VideoDiagnosticSink sink);
     void setDiagnosticCaptureEnabled(bool enabled) noexcept;
@@ -346,6 +379,8 @@ public:
     [[nodiscard]] bool takeVdp1DrawEnd() noexcept;
 
 private:
+    [[nodiscard]] bool changeVdp1Framebuffer(std::uint64_t presentedFrame);
+    void presentCurrentFrame();
     struct Vdp2CompositePixel {
         std::uint32_t topColor{};
         std::uint32_t secondColor{};
@@ -456,12 +491,14 @@ private:
     std::uint8_t vdp1GpuBank_{};
     bool vdp1DrawEndPending_{};
     std::uint8_t vdp1DisplayBank_{};
-    // Before FBCR manual-change mode is enabled the VDP1 exposes one logical
+    // Before FBCR is configured the VDP1 exposes one logical
     // framebuffer. Keep both selectors on bank zero so existing direct VRAM
     // tests and software that writes before configuring FBCR remain visible.
     std::uint8_t vdp1DrawBank_{};
+    bool vdp1FramebufferConfigured_{};
     bool vdp1SwapPending_{};
     bool vdp1ErasePending_{};
+    bool vdp1InVBlank_{}, vdp1VblankErasePending_{};
     std::uint64_t frameCount_{};
     bool framePending_{};
     bool deferredComposition_{}, compositionDirty_{};
@@ -470,6 +507,7 @@ private:
                           std::vector<std::uint32_t>(kFrameWidth * kFrameHeight)};
     VideoFrameSink frameSink_;
     VideoDiagnosticSink diagnosticSink_;
+    std::function<void(std::string_view)> debugEventSink_;
     bool diagnosticCaptureEnabled_{true};
     bool blackProbe_{}, probeSawVisible_{}, probeSawOff_{}, probeCaptured_{};
     bool diagnosticMemoryCapture_{};
@@ -477,6 +515,7 @@ private:
     std::vector<Vdp1CommandExecution> vdp1CommandHistory_;
     bool vdp1MemoryWriteTraceEnabled_{};
     std::deque<Vdp1MemoryWriteTraceEntry> vdp1MemoryWriteHistory_;
+    std::deque<Vdp1MemoryWriteTraceEntry> vdp1RegisterWriteHistory_;
     std::array<std::uint32_t, 8> vdp1MemoryWriteRegisters_{};
     bool vdp1MemoryWriteRegistersAvailable_{};
     std::vector<VideoWriteRegion> vramWrites_, cramWrites_;

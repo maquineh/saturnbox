@@ -8,10 +8,21 @@ add_executable(saturnbox-tests
     win64_jit_tests.cpp
     memory_map_tests.cpp
     slave_tests.cpp
+    vdp1_framebuffer_tests.cpp
+    scsp_timing_tests.cpp
+    vdp1_debug_tests.cpp
+    live_debug_tests.cpp
+    ../tools/saturn-sh2/src/live_debug.cpp
 )
 
 target_link_libraries(saturnbox-tests PRIVATE saturn::core saturn::sh2 saturn::platform)
 target_compile_features(saturnbox-tests PRIVATE cxx_std_20)
+
+if(SATURNBOX_MUSASHI_68K)
+    target_sources(saturnbox-tests PRIVATE m68k_tests.cpp)
+    target_link_libraries(saturnbox-tests PRIVATE saturn::m68k)
+    target_compile_definitions(saturnbox-tests PRIVATE SATURNBOX_TEST_M68K=1)
+endif()
 
 if(MSVC)
     target_compile_options(saturnbox-tests PRIVATE /W4 /permissive-)

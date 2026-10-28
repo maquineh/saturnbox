@@ -8,6 +8,13 @@ void registerSirTests(test::Registry& registry);
 void registerWin64JitTests(test::Registry& registry);
 void registerMemoryMapTests(test::Registry& registry);
 void registerSlaveTests(test::Registry& registry);
+void registerVdp1FramebufferTests(test::Registry& registry);
+void registerScspTimingTests(test::Registry& registry);
+void registerVdp1DebugTests(test::Registry& registry);
+void registerLiveDebugTests(test::Registry& registry);
+#ifdef SATURNBOX_TEST_M68K
+void registerM68kTests(test::Registry& registry);
+#endif
 
 int main() {
     test::Registry registry;
@@ -19,5 +26,12 @@ int main() {
     registerWin64JitTests(registry);
     registerMemoryMapTests(registry);
     registerSlaveTests(registry);
+    registerVdp1FramebufferTests(registry);
+    registerScspTimingTests(registry);
+    registerVdp1DebugTests(registry);
+    registerLiveDebugTests(registry);
+#ifdef SATURNBOX_TEST_M68K
+    registerM68kTests(registry);
+#endif
     return registry.run();
 }

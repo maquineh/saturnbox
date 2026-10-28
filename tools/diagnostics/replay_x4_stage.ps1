@@ -5,7 +5,8 @@ param(
     [long]$RightPressAfterBlocks = 122000000,
     [long]$RightReleaseAfterBlocks = 145000000,
     [string]$Name = ('player-stage-x-' + (Get-Date -Format 'yyyyMMdd-HHmmss')),
-    [switch]$TraceGame
+    [switch]$TraceGame,
+    [string]$ExecutablePath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,7 +21,11 @@ if ($Name -notmatch '^[a-zA-Z0-9_-]+$') {
     throw 'Name must contain only letters, digits, underscores or hyphens.'
 }
 
-$executable = Join-Path $taskRoot 'build/tools/saturn-sh2/Release/saturn-sh2.exe'
+$executable = if ([string]::IsNullOrWhiteSpace($ExecutablePath)) {
+    Join-Path $taskRoot 'build/tools/saturn-sh2/Release/saturn-sh2.exe'
+} else {
+    (Resolve-Path -LiteralPath $ExecutablePath).Path
+}
 $capture = Join-Path $taskRoot "build/artifacts/$Name"
 $log = Join-Path $taskRoot "build/tmp/$Name.log"
 $trace = Join-Path $taskRoot "build/tmp/control-trace-$Name.csv"

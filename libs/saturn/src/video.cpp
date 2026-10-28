@@ -21,8 +21,9 @@ constexpr std::uint8_t kVdp2PixelThirdValid = 0x04U;
 constexpr std::uint8_t kVdp2PixelTopScreenColorCalculation = 0x08U;
 constexpr std::uint8_t kVdp2PixelSecondScreenColorCalculation = 0x10U;
 constexpr std::size_t kVdp1TextureTraceBegin = 0x60000U;
-constexpr std::size_t kVdp1TextureTraceEnd = 0x60300U;
+constexpr std::size_t kVdp1TextureTraceEnd = 0x60A80U;
 constexpr std::size_t kVdp1TextureTraceLimit = 4096U;
+constexpr std::size_t kVdp1RegisterTraceLimit = 4096U;
 
 [[nodiscard]] std::uint32_t widthMask(std::uint8_t width) noexcept {
     return width == 1U ? 0xFFU : width == 2U ? 0xFFFFU : 0xFFFFFFFFU;
@@ -178,11 +179,11 @@ bool VideoRuntime::write(core::Address address, std::uint8_t width,
     return true;
 }
 
-void VideoRuntime::advanceFrame() {
-    // PTMR=2 is the automatic plot-trigger mode used by Rockman X4. Unlike
-    // PTMR=1, writing the register only arms VDP1; command execution begins
-    // at the next framebuffer/presentation boundary and repeats every frame.
-    if ((vdp1Register(0x04U) & 0x3U) == 2U) startVdp1Draw();
+void VideoRuntime::advanceFrame(bool startAutomaticDraw) {
+    // PTMR=2 is armed by its register write and starts after a bank change.
+    // The scheduler passes false while a manual frame spans several fields;
+    // explicit diagnostic advances retain their automatic-draw default.
+    if (startAutomaticDraw && (vdp1Register(0x04U) & 0x3U) == 2U) startVdp1Draw();
 
     ++frameCount_;
     lastFrame_.sequence = frameCount_;
@@ -210,6 +211,58 @@ std::uint64_t VideoRuntime::frameCount() const noexcept { return frameCount_; }
 bool VideoRuntime::framePending() const noexcept { return framePending_; }
 const VideoFrame& VideoRuntime::lastFrame() const noexcept { return lastFrame_; }
 
+void VideoRuntime::setDebugEventSink(std::function<void(std::string_view)> sink) {
+    debugEventSink_ = std::move(sink);
+}
+
+VideoDebugSnapshot VideoRuntime::captureDebugSnapshot(bool includeMemory) const {
+    synchronizeVdp1();
+    VideoDebugSnapshot snapshot;
+    snapshot.composed = lastFrame_;
+    snapshot.framebufferBanks = vdp1Framebuffers_;
+    if (includeMemory) {
+        snapshot.vdp1Vram = vdp1Vram_;
+        snapshot.vdp2Vram = vdp2Vram_;
+        snapshot.cram = vdp2Cram_;
+        snapshot.vdp1Registers = vdp1Registers_;
+        snapshot.vdp2Registers = vdp2Registers_;
+        // These readable status words live outside the backing register arrays.
+        for (const auto offset : {0x10U, 0x12U, 0x14U, 0x16U})
+            writeBytes(snapshot.vdp1Registers, offset, 2U, vdp1Register(offset));
+        writeBytes(snapshot.vdp2Registers, 0x04U, 2U, vdp2Register(0x04U));
+    }
+    snapshot.vdp1RegisterWriteHistory.assign(vdp1RegisterWriteHistory_.begin(),
+                                             vdp1RegisterWriteHistory_.end());
+    snapshot.vdp1MemoryWriteHistory.assign(vdp1MemoryWriteHistory_.begin(),
+                                           vdp1MemoryWriteHistory_.end());
+    snapshot.vdp1CommandHistory = vdp1CommandHistory_;
+    snapshot.contextStep = contextStep_;
+    snapshot.contextBlock = contextBlock_;
+    snapshot.contextCaller = contextCaller_;
+    snapshot.frameCount = frameCount_;
+    snapshot.compositionCount = compositionCount_;
+    snapshot.vdp1Tvmr = vdp1Register(0x00U);
+    snapshot.vdp1Fbcr = vdp1Register(0x02U);
+    snapshot.vdp1Ptmr = vdp1Register(0x04U);
+    snapshot.vdp1Ewdr = vdp1Register(0x06U);
+    snapshot.vdp1Ewlr = vdp1Register(0x08U);
+    snapshot.vdp1Ewrr = vdp1Register(0x0AU);
+    snapshot.vdp1Edsr = vdp1Edsr_;
+    snapshot.vdp1Lopr = vdp1Lopr_;
+    snapshot.vdp1Copr = vdp1Copr_;
+    snapshot.vdp1DisplayBank = vdp1DisplayBank_;
+    snapshot.vdp1DrawBank = vdp1DrawBank_;
+    snapshot.vdp1SwapPending = vdp1SwapPending_;
+    snapshot.vdp1ErasePending = vdp1ErasePending_;
+    snapshot.vdp1VblankErasePending = vdp1VblankErasePending_;
+    snapshot.vdp1InVBlank = vdp1InVBlank_;
+    snapshot.vdp1DrawEndPending = vdp1DrawEndPending_;
+    snapshot.vdp1FramebufferConfigured = vdp1FramebufferConfigured_;
+    snapshot.compositionDirty = compositionDirty_;
+    snapshot.framePending = framePending_;
+    return snapshot;
+}
+
 bool VideoRuntime::consumeFrame(VideoFrame& output) {
     if (!framePending_) return false;
     output = lastFrame_;
@@ -218,24 +271,47 @@ bool VideoRuntime::consumeFrame(VideoFrame& output) {
 }
 
 void VideoRuntime::presentFrame() {
+    static_cast<void>(changeVdp1Framebuffer(frameCount_));
+    presentCurrentFrame();
+}
+
+void VideoRuntime::onVBlankIn() {
+    vdp1InVBlank_ = true;
+    vdp1VblankErasePending_ = (vdp1Register(0x00U) & 0x8U) != 0U;
+}
+
+void VideoRuntime::onVBlankOut() {
+    const auto changed = changeVdp1Framebuffer(frameCount_ + 1U);
+    vdp1InVBlank_ = false;
+    advanceFrame(changed);
+    presentCurrentFrame();
+}
+
+bool VideoRuntime::changeVdp1Framebuffer(std::uint64_t presentedFrame) {
+    const bool automatic = vdp1FramebufferConfigured_ &&
+        (vdp1Register(0x02U) & 0x2U) == 0U;
     // VBlank erase operates on the display side before it becomes the next
     // draw side. It bypasses command clipping and accepts an EWDR of zero.
-    if ((vdp1Register(0x00U) & 0x8U) != 0U || vdp1ErasePending_) {
+    if (automatic || (vdp1Register(0x00U) & 0x8U) != 0U ||
+        vdp1VblankErasePending_ || vdp1ErasePending_) {
+        if (debugEventSink_) debugEventSink_("before-erase");
         eraseVdp1DisplayFramebuffer();
         vdp1ErasePending_ = false;
         compositionDirty_ = true;
+        if (debugEventSink_) debugEventSink_("after-erase");
     }
+    vdp1VblankErasePending_ = false;
     // In manual-change mode FBCR selects which bank is displayed and which
     // bank receives the next VDP1 command list. The hardware changes the
     // visible side at the presentation boundary, not when PTMR starts the
     // draw. Recompose after the swap so the host never sees the old side.
-    if (vdp1SwapPending_ && (vdp1Register(0x02U) & 0x3U) == 0x3U) {
+    if (automatic || vdp1SwapPending_) {
         const auto nextDisplayBank = vdp1DrawBank_;
         for (auto execution = vdp1CommandHistory_.rbegin();
              execution != vdp1CommandHistory_.rend(); ++execution) {
             if (!execution->wasPresented &&
                 execution->drawBank == nextDisplayBank) {
-                execution->presentedFrame = frameCount_;
+                execution->presentedFrame = presentedFrame;
                 execution->wasPresented = true;
                 execution->displayedBank = nextDisplayBank;
                 break;
@@ -246,7 +322,13 @@ void VideoRuntime::presentFrame() {
         vdp1SwapPending_ = false;
         compositionDirty_ = true;
         framePending_ = true;
+        if (debugEventSink_) debugEventSink_("after-swap");
+        return true;
     }
+    return false;
+}
+
+void VideoRuntime::presentCurrentFrame() {
     if (compositionDirty_) composeFrame();
     bool capture = diagnosticCaptureEnabled_ && static_cast<bool>(diagnosticSink_);
     if (blackProbe_) {
@@ -601,6 +683,7 @@ void VideoRuntime::setVdp1CommandTraceEnabled(bool enabled) noexcept {
 void VideoRuntime::setVdp1MemoryWriteTraceEnabled(bool enabled) noexcept {
     vdp1MemoryWriteTraceEnabled_ = enabled;
     if (!enabled) vdp1MemoryWriteHistory_.clear();
+    if (!enabled && !debugEventSink_) vdp1RegisterWriteHistory_.clear();
 }
 
 bool VideoRuntime::vdp1MemoryWriteTraceEnabled() const noexcept {
@@ -705,20 +788,32 @@ std::uint32_t VideoRuntime::frameHeight() const noexcept {
 
 void VideoRuntime::writeVdp1Register(std::uint32_t offset, std::uint16_t value) {
     if (offset == 0x10U || offset == 0x12U || offset == 0x14U || offset == 0x16U) return;
-    const auto previous = offset == 0x02U ? vdp1Register(0x02U) : 0U;
+    if (vdp1MemoryWriteTraceEnabled_ || debugEventSink_) {
+        if (vdp1RegisterWriteHistory_.size() == kVdp1RegisterTraceLimit)
+            vdp1RegisterWriteHistory_.pop_front();
+        vdp1RegisterWriteHistory_.push_back({contextStep_, contextBlock_,
+            contextCaller_, vdp1MemoryWriteRegistersAvailable_,
+            vdp1MemoryWriteRegisters_, 0x100000U + offset, 2U, value});
+    }
+    if (vdp1MemoryWriteTraceEnabled_) {
+        if (vdp1MemoryWriteHistory_.size() == kVdp1TextureTraceLimit)
+            vdp1MemoryWriteHistory_.pop_front();
+        vdp1MemoryWriteHistory_.push_back({contextStep_, contextBlock_,
+            contextCaller_, vdp1MemoryWriteRegistersAvailable_,
+            vdp1MemoryWriteRegisters_, 0x100000U + offset, 2U, value});
+    }
     writeBytes(vdp1Registers_, offset, 2U, value);
-    if (offset == 0x02U) vdp1ErasePending_ = (value & 0x3U) == 0x2U;
-    if (offset == 0x02U && (value & 0x3U) == 0x3U &&
-        (previous & 0x3U) != 0x3U) {
-        // FCM=1/FCT=1: the CPU writes the draw side while the other side is
-        // displayed. The initial logical side is bank zero; enabling manual
-        // change therefore moves the draw side to bank one without changing
-        // the currently displayed contents.
-        vdp1DrawBank_ = vdp1DisplayBank_ ^ 1U;
-        vdp1SwapPending_ = false;
-    } else if (offset == 0x02U && (value & 0x3U) != 0x3U) {
-        // Automatic/idle modes do not perform a pending manual-side switch.
-        vdp1SwapPending_ = false;
+    if (offset == 0x00U && vdp1InVBlank_ && (value & 0x8U) != 0U)
+        vdp1VblankErasePending_ = true;
+    if (offset == 0x02U) {
+        if (!vdp1FramebufferConfigured_) {
+            vdp1DrawBank_ = vdp1DisplayBank_ ^ 1U;
+            vdp1FramebufferConfigured_ = true;
+        }
+        // FCT is a one-field request, including repeated writes of 3.
+        // Drawing alone must never request a manual bank change.
+        vdp1ErasePending_ = (value & 0x3U) == 0x2U;
+        vdp1SwapPending_ = (value & 0x3U) == 0x3U;
     }
     if (offset == 0x04U && (value & 0x3U) == 1U) {
         startVdp1Draw();
@@ -735,12 +830,13 @@ void VideoRuntime::writeVdp2Register(std::uint32_t offset, std::uint16_t value) 
 }
 
 void VideoRuntime::startVdp1Draw() {
+    if (debugEventSink_) debugEventSink_("before-draw");
     vdp1Copr_ = 0U;
     executeVdp1Commands();
-    if ((vdp1Register(0x02U) & 0x3U) == 0x3U) vdp1SwapPending_ = true;
     // The VDP1 command-end factor is sampled by the host scheduler after the
     // current block, matching the non-preemptive event boundary used by DMA.
     vdp1DrawEndPending_ = true;
+    if (debugEventSink_) debugEventSink_("after-draw");
 }
 
 void VideoRuntime::eraseVdp1DisplayFramebuffer() {

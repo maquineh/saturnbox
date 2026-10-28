@@ -9,6 +9,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(SATURNBOX_BUILD_TESTS "Build SaturnBox unit tests" ON)
 option(ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 
+include(cmake/Musashi.cmake)
+
 if(ENABLE_SANITIZERS)
     if(MSVC)
         message(STATUS "Enabling AddressSanitizer for MSVC (UndefinedBehaviorSanitizer is unavailable)")
@@ -36,6 +38,9 @@ add_subdirectory(libs/sh2)
 add_subdirectory(libs/saturn)
 add_subdirectory(tools/saturn-sh2)
 add_subdirectory(tools/saturn-aot)
+if(SATURNBOX_MUSASHI_68K)
+    add_subdirectory(tools/saturn-scsp-probe)
+endif()
 
 if(SATURNBOX_BUILD_TESTS)
     enable_testing()

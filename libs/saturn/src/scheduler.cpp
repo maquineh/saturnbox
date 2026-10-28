@@ -42,19 +42,20 @@ std::optional<sir::InterruptRequest> ScuEventScheduler::beforeBlock(
         // at the same edge as the interrupt factor is raised.
         mmio.scuDma().onVBlank();
         mmio.raiseScuInterrupt(kVBlankInStatus);
-        // A VBlank is the presentation boundary for the HLE video runtime.
-        // Advance it even when the SH-2 masks or drops the corresponding
-        // interrupt; masking affects CPU delivery, not scan-out progress.
+        // The IN handler may request VBE erase/change during this blank.
+        // Finish it at OUT, before the guest clears VBE in its OUT handler.
         mmio.scsp().onVBlank();
-        mmio.video().advanceFrame();
-        mmio.video().presentFrame();
+        mmio.video().onVBlankIn();
         scanlineCounter_ = 0U;
-        if (hblankPeriodBlocks_ != 0U) {
-            vblankOutCountdown_ = hblankPeriodBlocks_ * kVBlankScanlines;
-        }
+        // Explicit events (period zero) still need an OUT edge. Artificial
+        // periods shorter than blank use a bounded one-block approximation.
+        vblankOutCountdown_ = hblankPeriodBlocks_ == 0U ? 1U :
+            std::min(hblankPeriodBlocks_ * kVBlankScanlines,
+                     std::max<std::size_t>(1U, vblankPeriodBlocks_ - 1U));
         ++stats_.vblankEvents;
     };
     const auto raiseVblankOut = [&] {
+        mmio.video().onVBlankOut();
         mmio.scuDma().onActivationFactor(
             ScuDmaRuntime::ActivationFactor::VBlankOut);
         mmio.raiseScuInterrupt(kVBlankOutStatus);
@@ -135,7 +136,7 @@ std::optional<sir::InterruptRequest> ScuEventScheduler::beforeBlock(
     mmio.onSchedulerTick(state);
 
     // The HLE renderer completes a PTMR=1 manual list synchronously and a
-    // PTMR=2 automatic list at VBlank above. In both cases the SCU draw-end
+    // PTMR=2 automatic list at VBlank-OUT above. In both cases the SCU draw-end
     // factor is sampled only at this boundary, so it cannot pre-empt the
     // initiating block.
     if (mmio.video().takeVdp1DrawEnd()) {

@@ -1,5 +1,6 @@
 add_executable(saturn-sh2
     src/main.cpp
+    src/live_debug.cpp
 )
 
 target_link_libraries(saturn-sh2 PRIVATE saturn::core saturn::sh2 saturn::platform)

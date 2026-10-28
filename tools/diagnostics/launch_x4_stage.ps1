@@ -2,7 +2,8 @@ param(
     [string]$DiscImage = 'H:/Isos/Rockman X4 (J)(Saturn)(ISO).mdf',
     [string]$Renderer = 'auto',
     [long]$VBlankBlocks = 10000,
-    [string]$ExecutablePath
+    [string]$ExecutablePath,
+    [string]$DebugSession
 )
 
 $ErrorActionPreference = 'Stop'
@@ -61,6 +62,9 @@ $runnerArguments = @(
     '--pad-live-after-blocks', '160000000',
     '--renderer', $Renderer
 )
+if (-not [string]::IsNullOrWhiteSpace($DebugSession)) {
+    $runnerArguments += @('--debug-session', [System.IO.Path]::GetFullPath($DebugSession))
+}
 
 Write-Output 'Opening X4. The known menu route and READY transition run first; live controls take over at 160M blocks.'
 Write-Output 'Once the stage appears, use arrows / Z-X-C / Enter or an XInput controller.'

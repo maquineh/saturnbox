@@ -9,10 +9,38 @@ iteration log is preserved in
 SaturnBox reaches the title and has captured a visible first-stage scene. A
 scripted right-input replay reached the first X gameplay scene and confirmed
 that the input travels through SMPC, gamepad normalization, and the player
-movement handler. The tests have not yet measured X's before/after position in
-the same replay, so displacement is not yet quantified.
+movement handler. A 2026-10-27 CPU replay sampled X immediately before and
+after a scripted right interval in one run and confirmed a positive position
+delta. The 16.16 interpretation is strongly supported but still inferred.
 
-The latest player-route evidence in the historical log is from 2026-10-26:
+The latest player-route evidence is from 2026-10-27:
+
+- The VDP1 erase/change cycle was corrected and checked with paired
+  172M-block replays. The released bank is clean in the new capture and the
+  stale player poses in the previous capture disappear. The new
+  [live debugger](pt-BR/LIVE-DEBUGGER.md) records eight pre/post frames,
+  framebuffer phases, memory, input and audio counters on F8 or a file request.
+  An [isolated SCSP driver probe](pt-BR/SCSP-DRIVER-PROBE.md) executes the real
+  68000 driver, including timer IRQs and a verified volume command; gameplay
+  effects and slot synthesis remain unfinished.
+- A recorded live-control session completed the introductory stage and
+  advanced into Frost Kibatodos's stage. It confirmed accumulated player
+  poses, localized striped sprite corruption, and user-reported pillar
+  occlusion and missing sound effects. The CPU frontend averaged 18.5453 FPS
+  and ended with seven cumulative audio underruns. See the
+  [live glitch audit](pt-BR/ROCKMAN-X4-LIVE-GLITCH-AUDIT.md) for evidence,
+  implementation gaps, and the limits of the causal diagnosis.
+- A 172-million-block CPU replay held right from 160M to 170M and captured
+  gameplay frame 53,015 at 168M. X's raw position changed from `0x00C80000`
+  before the press to `0x08A50000` before release: delta `0x07DD0000`, or
+  +2,013 units under the inferred 16.16 format. At the end sample, right was
+  still held and X speed was `0x00020000`.
+- The replay reached `step-limit` at 172M after the BIOS handoff. The CPU
+  reference renderer composed 76,800 non-black pixels at 320×240. Static code
+  executed 49,652,178 blocks, the JIT executed 128,571,986, and there was no
+  interpreter fallback.
+
+Earlier evidence from 2026-10-26:
 
 - A 30-million-block Vulkan replay reached handoff and reported 58.34 FPS on
   this host, six audio underruns, zero write errors, and 3,000 presented
@@ -23,8 +51,8 @@ The latest player-route evidence in the historical log is from 2026-10-26:
   visual capture alone did not prove movement.
 - A 168-million-block replay with right input captured frame 52,997. The SMPC
   reported right pressed, the normalized input held the expected bit, and the
-  player object selected rightward speed `0x00020000`. One position snapshot
-  cannot establish the resulting displacement.
+  player object selected rightward speed `0x00020000`. That run had only one
+  position sample; the later CPU replay supplies the before/after comparison.
 - The captured gameplay scene contained 224 VDP1 commands and 76,800
   non-black pixels. A `0xA80`-byte texture upload was traced to `PL00.ARC`;
   it was not evidence of a stage overlay swap.
@@ -42,13 +70,21 @@ During the 2026-10-25 gameplay replay, SMPC register `0x20100025` changed from
 The game reads and normalizes the active-low input, remaps the right bit to
 internal bit 1, and stores held/previous/pressed state in the player object.
 The movement handler selects direction `0x10` and X speed `0x00020000` in the
-captured state. The final position comparison is the next validation needed.
+captured state. In the 2026-10-27 replay, `obj+8` changed from
+`0x00C80000` to `0x08A50000` during the 160M–170M right interval. The raw
+positive delta proves that this position-like field advanced; interpreting it
+as Q16.16 world position remains an evidence-backed inference.
+
+The boot/launch CLI option `--x4-player-samples <csv>` records raw X position,
+velocity, input state, and movement gates immediately before each scripted pad
+change. The sample CSV for the measured route is
+`build/tmp/x4-player-position-20261027-run1.csv`.
 
 The launcher accepts a scripted pad sequence and can return the port to live
 keyboard/XInput control after a selected block count with
 `--pad-live-after-blocks`. The diagnostic launcher is
-`tools/diagnostics/launch_x4_stage.ps1`. A physical keyboard/gamepad movement
-test has not yet been recorded.
+`tools/diagnostics/launch_x4_stage.ps1`. A user-controlled movement and combat
+session was recorded on 2026-10-27, including completion of the first stage.
 
 ## Sprite and video evidence
 
@@ -123,15 +159,14 @@ Further visual and audio measurements here should use the CPU renderer. SCSP
 
 ## Next validation steps
 
-1. Capture player position before and after a held-right interval in one
-   gameplay run.
-2. Repeat input through a physical keyboard or XInput gamepad in the live
-   launcher.
-3. Follow the CD requests that load gameplay overlays and correlate each
+1. Use the live debugger during player-controlled dash/shot/explosion tests
+   to investigate remaining cases after the VDP1 fix; probe VDP2 special
+   priority at the pillar overlap.
+2. Follow the CD requests that load gameplay overlays and correlate each
    resource with VDP1 texture uploads.
-4. Execute the loaded sound driver on a 68EC000 core and handle the pending
+3. Execute the loaded sound driver on a 68EC000 core and handle the pending
    sequence/tone commands.
-5. Validate visible gameplay effects and sound events against a synchronized
+4. Validate visible gameplay effects and sound events against a synchronized
    reference recording.
 
 Related reports: [static route and AOT results](ROCKMAN-X4-STATIC-RECOMPILATION.md),

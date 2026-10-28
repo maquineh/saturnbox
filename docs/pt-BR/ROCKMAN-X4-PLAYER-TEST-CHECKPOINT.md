@@ -2,6 +2,20 @@
 
 ## Estado
 
+Atualização de 27/10, após o teste ao vivo: o usuário concluiu a fase inicial
+e avançou pela fase de Frost Kibatodos. Movimento e combate com controle ao
+vivo foram gravados. Duplicações de poses, corrupção listrada, oclusão e
+ausência de efeitos sonoros estão documentadas no
+[diagnóstico da sessão](ROCKMAN-X4-LIVE-GLITCH-AUDIT.md), com distinção entre
+sintomas confirmados, lacunas do código e causas ainda não comprovadas.
+As entradas abaixo preservam o histórico anterior.
+
+Na continuação dessa sessão, a limpeza/troca VDP1 foi corrigida e validada com
+replays antes/depois. O [debugger ao vivo](LIVE-DEBUGGER.md) permite novas
+capturas por F8 ou pedido externo durante a jogatina. O
+[probe SCSP](SCSP-DRIVER-PROBE.md) já executa o driver real com IRQs de timer e
+processa um pedido de volume; a síntese dos efeitos sonoros ainda está pendente.
+
 Atualização de 19/10: a rota curta seleciona X, pede `ST00_0_X.BIN` em FAD
 12965 e chega à primeira cena da fase. O replay corrigido terminou em 108M,
 com captura em 106M: X aparece azul e íntegro. Os 2.304 bytes da textura
@@ -1556,3 +1570,41 @@ suportado. Instalar apenas o loader não acrescentaria suporte de driver, e
 não são reproduzíveis nesta máquina; as próximas medições de imagem e áudio
 devem usar o caminho CPU. A execução do driver SCSP 68K para sequências e vozes
 continua sendo trabalho separado da escolha do renderer.
+
+### Posição de X antes/depois de direita (2026-10-27)
+
+Foi acrescentada a opção `--x4-player-samples <csv>` ao `saturn-sh2`. Em cada
+evento de `--pad-sequence`, ela registra o estado **antes** de aplicar a nova
+entrada, lendo RAM diretamente para não passar pelos interceptores. As colunas
+incluem bloco e quadro atuais, pad anterior e próximo, `obj+8`, velocidade X,
+held/previous/pressed e os gates `obj+0x84`, `obj+0x89` e `obj+0xC3`.
+
+O replay partiu do boot, usou VBlank de 14.000 blocos e renderer CPU. A rota
+programou direita em 160M e soltura em 170M; terminou no limite de 172M, após o
+handoff. As duas amostras relevantes foram feitas nos passos exatos:
+
+| Passo/fase | Pad anterior → próximo | `obj+8` X | Velocidade X | Held | Gates 84/89/C3 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 160.000.000, antes de pressionar | `0x0000 → 0x0001` | `0x00C80000` | `0x00000000` | `0x0000` | `0x00 / 0x08 / 0x00` |
+| 170.000.000, antes de soltar | `0x0001 → 0x0000` | `0x08A50000` | `0x00020000` | `0x0001` | `0x00 / 0x09 / 0x00` |
+
+O delta bruto é `+0x07DD0000`, igual a `+2013` unidades sob a interpretação
+16.16. Isso confirma que o campo de posição avançou durante a pressão de
+direita. O formato 16.16 é uma inferência forte; a relação exata entre essa
+coordenada e a rolagem da câmera ainda não foi estabelecida. Em `obj+0x89`, os
+bits de bloqueio conhecidos (1 e 2) não estão ativos nas duas amostras; `obj+
+0x84` e `obj+0xC3` permanecem zero.
+
+A captura no passo 168M tem 320×240 pixels, saída ativa e 76.800 pixels não
+pretos. O resumo chegou a `step-limit` em 172M com handoff; executou
+49.652.178 blocos nativos estáticos e 128.571.986 blocos JIT, sem fallback do
+interpretador. O slave executou 6.224.164 blocos.
+
+Artefatos: `build/tmp/x4-player-position-20261027-run1.csv` (22 amostras),
+`build/tmp/control-trace-player-x-position-20261027-run1.csv`,
+`build/artifacts/player-x-position-20261027-run1/captured-frame.ppm`,
+`build/artifacts/player-x-position-20261027-run1/video-diagnostics/ram_high.bin`,
+`build/rockman/player-route-20261027-run1-entries.txt` e o módulo observado
+`build/rockman/player-route-20261027-run1-module.cpp`. O movimento programado
+está confirmado. O teste posterior com controle ao vivo também foi realizado;
+ver o [diagnóstico da sessão](ROCKMAN-X4-LIVE-GLITCH-AUDIT.md).

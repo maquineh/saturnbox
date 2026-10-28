@@ -13,6 +13,7 @@
 #include "saturn/sir/module.hpp"
 #include "saturn/sir/static_module.hpp"
 #include "saturn/sir/win64_jit.hpp"
+#include "live_debug.hpp"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -37,6 +38,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -82,6 +84,8 @@ struct Arguments {
     std::optional<std::filesystem::path> aotEntryOutput;
     std::optional<std::filesystem::path> aotModuleOutput;
     std::optional<std::filesystem::path> controlTraceOutput;
+    std::optional<std::filesystem::path> x4PlayerSamplesOutput;
+    std::optional<std::filesystem::path> debugSessionDirectory;
     std::optional<std::string> padSequence;
     std::optional<std::size_t> padLiveAfterBlocks;
     std::optional<std::size_t> controlTraceFromStep;
@@ -2622,6 +2626,8 @@ void usage(std::ostream& stream) {
            << "      [--aot-entry-output <addresses.txt>] (record resolved SH-2 targets)\n"
            << "      [--aot-module-output <module.cpp>] (emit all SIR blocks discovered in this run)\n"
            << "      [--control-trace <events.csv>] (record scripted pad, SMPC and CD events)\n"
+           << "      [--x4-player-samples <events.csv>] (sample X before each scripted pad change)\n"
+           << "      [--debug-session <directory>] (F8 or capture.request saves a live diagnostic clip)\n"
            << "      [--control-trace-from-step <count>] (requires --control-trace)\n"
            << "      [--control-trace-oreg2-only] (retain only OREG2 SMPC reads plus pad/CD events)\n"
            << "      [--window] [--audio-live] [--renderer auto|cpu|vulkan]\n"
@@ -2687,6 +2693,7 @@ std::optional<Arguments> parseArguments(int argc, char** argv) {
              option == "--aot-entry-output" ||
              option == "--aot-module-output" ||
               option == "--control-trace" ||
+              option == "--x4-player-samples" ||
               option == "--control-trace-from-step" ||
              option == "--pad-sequence" ||
              option == "--pad-live-after-blocks" ||
@@ -2697,7 +2704,7 @@ std::optional<Arguments> parseArguments(int argc, char** argv) {
              option == "--pad-second-release-after-blocks" ||
              option == "--pad-third-press-after-blocks" ||
              option == "--pad-third-release-after-blocks" ||
-             option == "--frame-capture-after-blocks") &&
+             option == "--frame-capture-after-blocks" || option == "--debug-session") &&
             index + 1 >= argc) {
             return std::nullopt;
         }
@@ -2730,6 +2737,8 @@ std::optional<Arguments> parseArguments(int argc, char** argv) {
             arguments.resourceBase = *value;
         } else if (option == "--frame-dir") {
             arguments.frameDirectory = std::filesystem::path(argv[++index]);
+        } else if (option == "--debug-session") {
+            arguments.debugSessionDirectory = std::filesystem::path(argv[++index]);
         } else if (option == "--black-frame-probe") {
             arguments.blackFrameProbe = std::filesystem::path(argv[++index]);
         } else if (option == "--vdp2-map-trace") {
@@ -2749,6 +2758,8 @@ std::optional<Arguments> parseArguments(int argc, char** argv) {
             arguments.aotModuleOutput = std::filesystem::path(argv[++index]);
         } else if (option == "--control-trace") {
             arguments.controlTraceOutput = std::filesystem::path(argv[++index]);
+        } else if (option == "--x4-player-samples") {
+            arguments.x4PlayerSamplesOutput = std::filesystem::path(argv[++index]);
         } else if (option == "--control-trace-from-step") {
             std::size_t value{};
             const std::string_view text = argv[++index];
@@ -2884,7 +2895,14 @@ std::optional<Arguments> parseArguments(int argc, char** argv) {
     if (arguments.controlTraceOreg2Only && !arguments.controlTraceOutput) {
         return std::nullopt;
     }
+    if (arguments.x4PlayerSamplesOutput &&
+        ((arguments.command != "boot" && arguments.command != "launch") ||
+         !arguments.padSequence)) {
+        return std::nullopt;
+    }
     if (arguments.frameCaptureAfterBlocks && !arguments.frameDirectory) return std::nullopt;
+    if (arguments.debugSessionDirectory &&
+        (arguments.command != "boot" && arguments.command != "launch")) return std::nullopt;
     if (arguments.traceCdSectors && !arguments.frameDirectory) return std::nullopt;
     if (arguments.padLiveAfterBlocks &&
         (!arguments.padSequence || !arguments.window || arguments.padButtons[0] ||
@@ -4962,6 +4980,21 @@ public:
 
     [[nodiscard]] bool shouldQuit() const noexcept { return quit_; }
 
+    [[nodiscard]] bool takeDebugCaptureRequest() noexcept {
+        return std::exchange(debugCaptureRequested_, false);
+    }
+    void setDebugEnabled(bool enabled) noexcept { debugEnabled_ = enabled; }
+
+    [[nodiscard]] std::array<std::size_t, 6> debugCounters() {
+#if defined(_WIN32)
+        std::lock_guard lock(audioMutex_);
+        return {audioUnderruns_, audioWaits_, audioWriteErrors_,
+                audioTruncatedFrames_, nearBlackFrames_, videoFrames_};
+#else
+        return {};
+#endif
+    }
+
     void attachInput(saturn::platform::SmpcRuntime& smpc,
                      std::array<bool, 2> scriptedPorts, bool vulkan) {
 #if defined(_WIN32)
@@ -5035,6 +5068,7 @@ public:
                       << L" clipped " << audioTruncatedFrames_;
             }
             title << L" | F1: controles";
+            if (debugEnabled_) title << L" | F8: captura debug";
             SetWindowTextW(hwnd_, title.str().c_str());
             fpsEpoch_ = now;
             fpsFrames_ = 0U;
@@ -5436,6 +5470,9 @@ private:
                     frontend->helpVisible_ = !frontend->helpVisible_;
                     InvalidateRect(window, nullptr, FALSE);
                 }
+                if (frontend->debugEnabled_ && message == WM_KEYDOWN && wParam == VK_F8 &&
+                    (lParam & (1LL << 30U)) == 0)
+                    frontend->debugCaptureRequested_ = true;
                 return 0;
             case WM_PAINT: {
                 PAINTSTRUCT paintStruct{};
@@ -5486,6 +5523,8 @@ private:
     bool windowEnabled_{};
     bool audioEnabled_{};
     bool quit_{};
+    bool debugCaptureRequested_{};
+    bool debugEnabled_{};
 #if defined(_WIN32)
     std::uint32_t frameWidth_{320U};
     std::uint32_t frameHeight_{224U};
@@ -5698,6 +5737,31 @@ int boot(const Arguments& arguments) {
         }
         padSequenceEvents = *parsed;
     }
+    std::ofstream x4PlayerSamplesFile;
+    std::size_t x4PlayerSampleCount{};
+    bool x4PlayerSampleWriteFailure{};
+    if (arguments.x4PlayerSamplesOutput) {
+        std::error_code sampleError;
+        if (!arguments.x4PlayerSamplesOutput->parent_path().empty()) {
+            std::filesystem::create_directories(
+                arguments.x4PlayerSamplesOutput->parent_path(), sampleError);
+        }
+        if (sampleError) {
+            std::cerr << "error: unable to create X4 player sample directory: "
+                      << sampleError.message() << '\n';
+            return 1;
+        }
+        x4PlayerSamplesFile.open(*arguments.x4PlayerSamplesOutput, std::ios::trunc);
+        if (!x4PlayerSamplesFile) {
+            std::cerr << "error: unable to write X4 player samples "
+                      << arguments.x4PlayerSamplesOutput->string() << '\n';
+            return 1;
+        }
+        x4PlayerSamplesFile << "# phase=before_pad_change; event_index=zero_based\n"
+            << "event_index,scheduled_step,actual_step,block,frame_sequence,"
+               "pad_before,pad_next,x_raw,vx_raw,held_raw,previous_raw,pressed_raw,"
+               "gate_84,gate_89,gate_c3\n";
+    }
     if (arguments.padLiveAfterBlocks &&
         (padSequenceEvents.empty() ||
          *arguments.padLiveAfterBlocks < padSequenceEvents.back().first)) {
@@ -5762,7 +5826,77 @@ int boot(const Arguments& arguments) {
     }
     const auto realtimeWindow = realtime && arguments.window ? &*realtime : nullptr;
     const auto realtimeAudio = realtime && arguments.audioLive ? &*realtime : nullptr;
-    if (arguments.frameDirectory || realtimeWindow != nullptr) {
+    std::unique_ptr<saturn::tools::LiveDebugSession> liveDebug;
+    const auto debugStart = std::chrono::steady_clock::now();
+    auto nextDebugPoll = debugStart;
+    bool debugAttachNextFrame{};
+    std::string debugReportedError;
+    if (arguments.debugSessionDirectory) {
+        try {
+            liveDebug = std::make_unique<saturn::tools::LiveDebugSession>(*arguments.debugSessionDirectory);
+        } catch (const std::exception& error) {
+            std::cerr << "error: live debugger: " << error.what() << '\n';
+            return 1;
+        }
+        if (liveDebug->hasError()) {
+            std::cerr << "error: live debugger: " << liveDebug->lastError() << '\n';
+            return 1;
+        }
+        mmio.video().setVdp1CommandTraceEnabled(true);
+        mmio.video().setVdp1MemoryWriteTraceEnabled(true);
+        if (realtimeWindow) realtimeWindow->setDebugEnabled(true);
+        std::ofstream latest(*arguments.debugSessionDirectory / "latest-session.txt");
+        latest << liveDebug->directory().string() << '\n';
+        if (!latest) std::cerr << "warning: cannot write latest debugger session pointer\n";
+        std::ofstream config(liveDebug->directory() / "runtime.txt");
+        config << "compiler_build_stamp=" << __DATE__ << ' ' << __TIME__ << '\n'
+               << "renderer=" << (vdp1Renderer ? "vulkan" : "cpu") << '\n'
+               << "vblank_blocks=" << arguments.vblankPeriodBlocks << '\n'
+               << "aip=" << arguments.input.string() << '\n'
+               << "program=" << (arguments.program ? arguments.program->string() : "") << '\n'
+               << "disc=" << (arguments.discImage ? arguments.discImage->string() : "") << '\n'
+               << "disc_sector_size=" << arguments.discSectorSize << '\n'
+               << "pad_sequence=" << arguments.padSequence.value_or("") << '\n';
+        if (!config) std::cerr << "warning: cannot write debugger runtime configuration\n";
+        std::cout << "  live debugger: " << liveDebug->directory().string()
+                  << " (F8 or capture.request)\n";
+    }
+    const auto debugMetadata = [&]() {
+        saturn::tools::DebugMetadata metadata;
+        metadata.utcEpochMs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        metadata.elapsedMs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - debugStart).count());
+        metadata.pad = mmio.smpc().pad(0).pressed;
+        for (unsigned byte = 0; byte < 4U; ++byte)
+            metadata.playerXRaw = (metadata.playerXRaw << 8U) | state.readRaw8(0x060545A8U + byte);
+        metadata.playerX = metadata.playerXRaw >> 16U;
+        const auto& sound = mmio.scsp().stats();
+        std::ostringstream stats;
+        stats << "frames=" << sound.audioFrames << ";samples=" << sound.audioSamples
+              << ";voices=" << sound.activeVoices << ";pcm_starts=" << sound.pcmStarts;
+        for (const auto command : {0x01U, 0x05U, 0x08U, 0x0EU, 0x85U, 0x86U, 0x87U, 0x8AU})
+            stats << ";cmd_" << std::hex << command << '=' << std::dec << sound.soundCommands[command];
+        if (realtime) {
+            const auto counters = realtime->debugCounters();
+            metadata.audioUnderruns = counters[0];
+            stats << ";audio_waits=" << counters[1] << ";audio_errors=" << counters[2]
+                  << ";audio_truncated=" << counters[3] << ";dark_frames=" << counters[4]
+                  << ";frontend_frames=" << counters[5];
+        }
+        metadata.scspStats = stats.str();
+        return metadata;
+    };
+    if (liveDebug) mmio.video().setDebugEventSink([&](std::string_view phase) {
+        if (!liveDebug->isCapturing()) return;
+        auto snapshot = mmio.video().captureDebugSnapshot(true);
+        auto metadata = debugMetadata();
+        metadata.step = snapshot.contextStep;
+        metadata.block = snapshot.contextBlock;
+        metadata.caller = snapshot.contextCaller;
+        liveDebug->recordPhase(phase, std::move(snapshot), std::move(metadata));
+    });
+    if (arguments.frameDirectory || realtimeWindow != nullptr || liveDebug) {
         const auto directory = arguments.frameDirectory ? *arguments.frameDirectory
                                                          : std::filesystem::path{};
         std::error_code error;
@@ -5773,12 +5907,58 @@ int boot(const Arguments& arguments) {
             return 1;
         }
         mmio.video().setFrameSink([directory, realtimeWindow, arguments,
+                                   &liveDebug, &debugMetadata, &debugAttachNextFrame,
+                                   &nextDebugPoll, &state, &mmio,
+                                   &debugReportedError,
                                    &presentedFrames, &frameWriteFailure,
                                    &frameCaptureArmed, &frameCaptured,
                                    &frameCaptureArmedAt,
                                    previous = saturn::platform::VideoFrame{}](
                                       const saturn::platform::VideoFrame& frame) mutable {
             if (realtimeWindow != nullptr) realtimeWindow->onVideoFrame(frame);
+            if (liveDebug) {
+                const auto now = std::chrono::steady_clock::now();
+                const bool hotkey = realtimeWindow && realtimeWindow->takeDebugCaptureRequest();
+                if (hotkey) static_cast<void>(liveDebug->request("F8 player marker"));
+                if (hotkey || now >= nextDebugPoll) {
+                    if (const auto reason = liveDebug->pollRequest()) {
+                        debugAttachNextFrame = true;
+                        std::cout << "debug-capture requested: " << *reason << '\n';
+                    }
+                    if (liveDebug->hasError() && liveDebug->lastError() != debugReportedError) {
+                        debugReportedError = liveDebug->lastError();
+                        std::cerr << "warning: live debugger: " << debugReportedError << '\n';
+                    }
+                    nextDebugPoll = now + std::chrono::milliseconds(250);
+                }
+                auto snapshot = mmio.video().captureDebugSnapshot(liveDebug->isCapturing());
+                auto metadata = debugMetadata();
+                metadata.step = snapshot.contextStep;
+                metadata.block = snapshot.contextBlock;
+                metadata.caller = snapshot.contextCaller;
+                if (debugAttachNextFrame) {
+                    for (const auto base : {0x00200000U, 0x06000000U}) {
+                        std::vector<std::uint8_t> bytes(0x100000U);
+                        for (std::size_t offset = 0; offset < bytes.size(); ++offset)
+                            bytes[offset] = state.readRaw8(static_cast<saturn::core::Address>(base + offset));
+                        metadata.attachments.push_back({base == 0x00200000U ? "ram_low.bin" : "ram_high.bin",
+                                                        std::move(bytes)});
+                    }
+                    std::vector<std::uint8_t> soundRam(saturn::platform::ScspRuntime::kRamSize);
+                    for (std::size_t offset = 0; offset < soundRam.size(); ++offset)
+                        soundRam[offset] = static_cast<std::uint8_t>(mmio.scsp().read(
+                            static_cast<saturn::core::Address>(saturn::platform::ScspRuntime::kRamBase + offset), 1U).value_or(0U));
+                    metadata.attachments.push_back({"scsp_ram.bin", std::move(soundRam)});
+                    std::ostringstream cpuSlots;
+                    cpuSlots << "slot,value_hex\n";
+                    for (const auto& [slot, value] : state.stateSlots())
+                        cpuSlots << std::dec << slot << ",0x" << std::hex << value << '\n';
+                    const auto slotText = cpuSlots.str();
+                    metadata.attachments.push_back({"cpu_slots.csv", {slotText.begin(), slotText.end()}});
+                    debugAttachNextFrame = false;
+                }
+                liveDebug->recordFrame(std::move(snapshot), std::move(metadata));
+            }
             if (arguments.frameDirectory) {
                 ++presentedFrames;
                 if (arguments.frameCaptureAfterBlocks) {
@@ -5977,7 +6157,10 @@ int boot(const Arguments& arguments) {
     };
     options.beforeBlock = [&bootServices, &acceleratedByteFills, &acceleratedWordFills,
                            &acceleratedWordCopies, &realtime, &memoryProbe, expectedEntry,
-                           &mmio, &padSequenceEvents, padSequenceNextEvent = std::size_t{},
+                           &mmio, &padSequenceEvents, &x4PlayerSamplesFile,
+                           &x4PlayerSampleCount, &x4PlayerSampleWriteFailure,
+                           captureX4PlayerSamples = arguments.x4PlayerSamplesOutput.has_value(),
+                           padSequenceNextEvent = std::size_t{},
                            &delayedPads, &configuredPads, &configuredPadStates,
                            padAfterBlocks = arguments.padAfterBlocks,
                            padReleaseAfterBlocks = arguments.padReleaseAfterBlocks,
@@ -6002,6 +6185,41 @@ int boot(const Arguments& arguments) {
         }
         while (padSequenceNextEvent < padSequenceEvents.size() &&
                step >= padSequenceEvents[padSequenceNextEvent].first) {
+            if (captureX4PlayerSamples) {
+                constexpr saturn::core::Address kX4Player = 0x060545A0U;
+                const auto readRaw16 = [&state](saturn::core::Address address) {
+                    return static_cast<std::uint16_t>(
+                        (static_cast<std::uint16_t>(state.readRaw8(address)) << 8U) |
+                        state.readRaw8(address + 1U));
+                };
+                const auto readRaw32 = [&state](saturn::core::Address address) {
+                    return (static_cast<std::uint32_t>(state.readRaw8(address)) << 24U) |
+                           (static_cast<std::uint32_t>(state.readRaw8(address + 1U)) << 16U) |
+                           (static_cast<std::uint32_t>(state.readRaw8(address + 2U)) << 8U) |
+                           state.readRaw8(address + 3U);
+                };
+                const auto& event = padSequenceEvents[padSequenceNextEvent];
+                x4PlayerSamplesFile << padSequenceNextEvent << ',' << event.first << ','
+                    << step << ',' << saturn::sh2::formatAddress(block.address()) << ','
+                    << mmio.video().lastFrame().sequence << ",0x" << std::hex
+                    << std::uppercase << std::setw(4) << std::setfill('0')
+                    << mmio.smpc().pad(0U).pressed << ",0x" << std::setw(4)
+                    << event.second.pressed << ','
+                    << saturn::sh2::formatAddress(readRaw32(kX4Player + 0x08U)) << ','
+                    << saturn::sh2::formatAddress(readRaw32(kX4Player + 0x20U))
+                    << ",0x" << std::setw(4) << readRaw16(kX4Player + 0x7CU)
+                    << ",0x" << std::setw(4) << readRaw16(kX4Player + 0x7EU)
+                    << ",0x" << std::setw(4) << readRaw16(kX4Player + 0x80U)
+                    << ",0x" << std::setw(2) << static_cast<unsigned>(
+                           state.readRaw8(kX4Player + 0x84U))
+                    << ",0x" << std::setw(2) << static_cast<unsigned>(
+                           state.readRaw8(kX4Player + 0x89U))
+                    << ",0x" << std::setw(2) << static_cast<unsigned>(
+                           state.readRaw8(kX4Player + 0xC3U))
+                    << std::dec << std::nouppercase << std::setfill(' ') << '\n';
+                ++x4PlayerSampleCount;
+                if (!x4PlayerSamplesFile) x4PlayerSampleWriteFailure = true;
+            }
             mmio.smpc().setPad(0U, padSequenceEvents[padSequenceNextEvent].second);
             mmio.recordPadInput(step, 0U,
                                 padSequenceEvents[padSequenceNextEvent].second);
@@ -6243,12 +6461,30 @@ int boot(const Arguments& arguments) {
         execution.address = failure.address;
         execution.steps = failure.step;
     }
+    if (liveDebug) {
+        liveDebug->flush();
+        std::cout << "  debug session: " << liveDebug->directory().string()
+                  << ", dropped snapshots: " << liveDebug->droppedSnapshots() << '\n';
+        if (liveDebug->hasError())
+            std::cerr << "warning: live debugger: " << liveDebug->lastError() << '\n';
+    }
     bool controlTraceWriteFailure{};
     if (arguments.controlTraceOutput &&
         !writeControlTrace(*arguments.controlTraceOutput, mmio)) {
         std::cerr << "error: unable to write control trace "
                   << arguments.controlTraceOutput->string() << '\n';
         controlTraceWriteFailure = true;
+    }
+    if (arguments.x4PlayerSamplesOutput) {
+        x4PlayerSamplesFile.flush();
+        if (!x4PlayerSamplesFile || x4PlayerSampleWriteFailure) {
+            std::cerr << "error: unable to finish X4 player samples "
+                      << arguments.x4PlayerSamplesOutput->string() << '\n';
+            controlTraceWriteFailure = true;
+        } else {
+            std::cout << "  X4 player samples recorded: "
+                      << x4PlayerSampleCount << '\n';
+        }
     }
     if (arguments.aotEntryOutput) {
         std::ofstream entries(*arguments.aotEntryOutput, std::ios::trunc);

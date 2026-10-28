@@ -2893,9 +2893,10 @@ void presentsOnlyAtSchedulerFrameBoundary() {
     sir::Module module;
     auto& block = module.createBlock(0x06010000U, "presentation-boundary");
     sir::MachineState state;
-    platform::ScuEventScheduler scheduler(1U);
+    platform::ScuEventScheduler scheduler(263U);
     mmio.attachMachineState(state);
-    REQUIRE(!scheduler.beforeBlock(block, state, 0U, mmio).has_value());
+    for (std::size_t step = 0; step < 302U; ++step)
+        static_cast<void>(scheduler.beforeBlock(block, state, step, mmio));
     REQUIRE(presentations == 1U);
     REQUIRE(lastSequence == 2U);
 }
@@ -2951,9 +2952,9 @@ void swapsVdp1ManualFramebufferAtPresentation() {
     REQUIRE(mmio.video().consumeFrame(frame));
     REQUIRE(frame.pixels[0U] == 0xFF00FF00U);
 
-    // The next PTMR draw targets bank zero while bank one remains displayed;
-    // the second presentation therefore reveals the new red frame.
+    // Request the second change explicitly; PTMR draws do not request it.
     REQUIRE(mmio.write(framebuffer, 2, 0x801FU));
+    REQUIRE(mmio.write(registers + 0x02U, 2, 0x0003U));
     REQUIRE(mmio.write(registers + 0x04U, 2, 1U));
     mmio.video().presentFrame();
     REQUIRE(mmio.video().consumeFrame(frame));
