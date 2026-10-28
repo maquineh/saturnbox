@@ -10,6 +10,8 @@ void registerMemoryMapTests(test::Registry& registry);
 void registerSlaveTests(test::Registry& registry);
 void registerVdp1FramebufferTests(test::Registry& registry);
 void registerScspTimingTests(test::Registry& registry);
+void registerScspSynthTests(test::Registry& registry);
+void registerScspDriverTests(test::Registry& registry);
 void registerVdp1DebugTests(test::Registry& registry);
 void registerLiveDebugTests(test::Registry& registry);
 #ifdef SATURNBOX_TEST_M68K
@@ -28,6 +30,8 @@ int main() {
     registerSlaveTests(registry);
     registerVdp1FramebufferTests(registry);
     registerScspTimingTests(registry);
+    registerScspSynthTests(registry);
+    registerScspDriverTests(registry);
     registerVdp1DebugTests(registry);
     registerLiveDebugTests(registry);
 #ifdef SATURNBOX_TEST_M68K

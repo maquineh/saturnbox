@@ -360,6 +360,7 @@ bool MmioInterceptor::write(core::Address address, std::uint8_t width,
     value &= mask;
     if (space == AddressSpace::Smpc) {
         static_cast<void>(smpc_.write(mappedAddress, width, value));
+        scsp_.setSoundCpuEnabled(smpc_.soundCpuEnabled());
     } else if (space == AddressSpace::CdBlock) {
         recordControlAccess(mappedAddress, width, value, space, true);
         static_cast<void>(cd_.write(mappedAddress, width, value));

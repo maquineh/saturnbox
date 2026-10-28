@@ -177,6 +177,14 @@ void SmpcRuntime::executeCommand(std::uint8_t command) {
         intbackStatusPhase_ = (iregs_[0] & 1U) != 0U;
         executeIntback();
         break;
+    case 0x06U:
+        soundCpuEnabled_ = true;
+        oregs_[31] = command;
+        break;
+    case 0x07U:
+        soundCpuEnabled_ = false;
+        oregs_[31] = command;
+        break;
     case 0x0DU: resetRequested_ = resetEnabled_; break;
     case 0x19U: resetEnabled_ = true; break;
     case 0x1AU: resetEnabled_ = false; break;

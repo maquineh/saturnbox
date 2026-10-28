@@ -14,7 +14,10 @@ Na continuação dessa sessão, a limpeza/troca VDP1 foi corrigida e validada co
 replays antes/depois. O [debugger ao vivo](LIVE-DEBUGGER.md) permite novas
 capturas por F8 ou pedido externo durante a jogatina. O
 [probe SCSP](SCSP-DRIVER-PROBE.md) já executa o driver real com IRQs de timer e
-processa um pedido de volume; a síntese dos efeitos sonoros ainda está pendente.
+processa um pedido de volume. A implementação posterior acrescentou slots PCM,
+envelopes e o modo `--scsp-driver`; o boot de 25M pela ISO produziu áudio com
+27 key-ons e erro SDK zero. A validação de tiros/WARNING/explosões e DSP
+continua pendente.
 
 Atualização de 19/10: a rota curta seleciona X, pede `ST00_0_X.BIN` em FAD
 12965 e chega à primeira cena da fase. O replay corrigido terminou em 108M,

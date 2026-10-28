@@ -8,6 +8,7 @@ add_library(saturn_platform
     src/slave.cpp
     src/scsp.cpp
     src/scsp_timing.cpp
+    src/scsp_synth.cpp
     src/smpc.cpp
     src/video.cpp
     src/vulkan_vdp1.cpp
@@ -21,6 +22,10 @@ target_include_directories(saturn_platform
 )
 target_link_libraries(saturn_platform PUBLIC saturn::core saturn::sir saturn::sh2)
 target_compile_features(saturn_platform PUBLIC cxx_std_20)
+if(SATURNBOX_MUSASHI_68K)
+    target_link_libraries(saturn_platform PUBLIC saturn::m68k)
+    target_compile_definitions(saturn_platform PUBLIC SATURNBOX_HAS_M68K=1)
+endif()
 
 option(SATURNBOX_VULKAN "Build the VDP1 Vulkan compute backend" ON)
 if(SATURNBOX_VULKAN)

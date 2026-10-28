@@ -1,9 +1,15 @@
 #include "saturn/saturn/scsp.hpp"
 
 #include "saturn/sir/interpreter.hpp"
+#include "saturn/saturn/scsp_synth.hpp"
+#include "saturn/saturn/scsp_timing.hpp"
+#ifdef SATURNBOX_HAS_M68K
+#include "saturn/saturn/m68k.hpp"
+#endif
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 #include <utility>
 
 namespace saturn::platform {
@@ -20,6 +26,122 @@ namespace {
 
 } // namespace
 
+struct ScspRuntime::DriverBackend {
+    explicit DriverBackend(ScspRuntime& runtime) : owner(runtime) {
+#ifdef SATURNBOX_HAS_M68K
+        cpu = std::make_unique<M68k>(M68k::Bus{
+            [this](auto a) { return static_cast<std::uint8_t>(readBus(a, 1U)); },
+            [this](auto a) { return static_cast<std::uint16_t>(readBus(a, 2U)); },
+            [this](auto a) { return readBus(a, 4U); },
+            [this](auto a, std::uint8_t v) { writeBus(a, 1U, v); },
+            [this](auto a, std::uint16_t v) { writeBus(a, 2U, v); },
+            [this](auto a, std::uint32_t v) { writeBus(a, 4U, v); }});
+#endif
+    }
+
+    std::uint32_t readRegister(std::uint32_t offset, std::uint8_t width) const {
+        std::uint32_t result{};
+        for (std::uint8_t byte = 0; byte < width; ++byte) {
+            const auto at = offset + byte;
+            const auto timed = at <= 0xFFFFU ? timing.read(static_cast<std::uint16_t>(at), 1U) : std::nullopt;
+            const auto value = timed ? *timed : synth.read(at, 1U).value_or(0U);
+            result = (result << 8U) | (value & 0xFFU);
+        }
+        return result;
+    }
+
+    void writeRegister(std::uint32_t offset, std::uint8_t width, std::uint32_t value) {
+        static_cast<void>(synth.write(offset, width, value));
+        for (std::uint8_t byte = 0; byte < width; ++byte) {
+            const auto at = offset + byte;
+            if (at <= 0xFFFFU) static_cast<void>(timing.write(static_cast<std::uint16_t>(at), 1U,
+                (value >> ((width - byte - 1U) * 8U)) & 0xFFU));
+        }
+        ++owner.stats_.driverRegisterWrites;
+#ifdef SATURNBOX_HAS_M68K
+        cpu->setIrq(timing.irqLevel());
+#endif
+    }
+
+    std::uint32_t readBus(std::uint32_t address, std::uint8_t width) const {
+        address &= 0xFFFFFFU;
+        if (address < kRamSize) return readBytes(owner.ram_, address, width);
+        if (address >= 0x100000U && address + width <= 0x101000U)
+            return readRegister(address - 0x100000U, width);
+        ++owner.stats_.driverUnmappedReads;
+        return widthMask(width);
+    }
+
+    void writeBus(std::uint32_t address, std::uint8_t width, std::uint32_t value) {
+        address &= 0xFFFFFFU;
+        if (address < kRamSize) writeBytes(owner.ram_, address, width, value);
+        else if (address >= 0x100000U && address + width <= 0x101000U)
+            writeRegister(address - 0x100000U, width, value);
+        else ++owner.stats_.driverUnmappedWrites;
+    }
+
+    std::array<float, 2> renderSample() {
+#ifdef SATURNBOX_HAS_M68K
+        if (owner.soundCpuEnabled_) {
+            if (needsReset) {
+                const auto sp = readBytes(owner.ram_, 0U, 4U);
+                const auto pc = readBytes(owner.ram_, 4U, 4U);
+                if (sp > kRamSize || pc >= kRamSize || ((sp | pc) & 1U) != 0U)
+                    throw DriverError("SCSP 68000 reset vectors are invalid");
+                cpu->reset();
+                cycleDebt = 0;
+                needsReset = false;
+                ++owner.stats_.driverResets;
+            }
+            cpu->setIrq(timing.irqLevel());
+            if (cycleDebt < 256) {
+                const auto cycles = cpu->execute(static_cast<std::uint32_t>(256 - cycleDebt));
+                cycleDebt += cycles;
+                owner.stats_.driverCycles += cycles;
+            }
+            cycleDebt -= 256;
+            owner.stats_.driverPc = cpu->pc();
+        }
+#endif
+        const auto sample = synth.renderSample(owner.ram_);
+        timing.advanceSamples(1U);
+        return sample;
+    }
+
+    ScspRuntime& owner;
+    ScspSynth synth;
+    ScspTiming timing;
+    std::int64_t cycleDebt{};
+    bool needsReset{true};
+#ifdef SATURNBOX_HAS_M68K
+    std::unique_ptr<M68k> cpu;
+#endif
+};
+
+ScspRuntime::ScspRuntime() = default;
+ScspRuntime::~ScspRuntime() = default;
+
+bool ScspRuntime::driverCpuAvailable() noexcept {
+#ifdef SATURNBOX_HAS_M68K
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool ScspRuntime::enableDriverCpu() {
+    if (!driverCpuAvailable()) return false;
+    if (!driver_) driver_ = std::make_unique<DriverBackend>(*this);
+    return true;
+}
+
+bool ScspRuntime::driverCpuEnabled() const noexcept { return static_cast<bool>(driver_); }
+
+void ScspRuntime::setSoundCpuEnabled(bool enabled) noexcept {
+    if (driver_ && enabled && !soundCpuEnabled_) driver_->needsReset = true;
+    soundCpuEnabled_ = enabled;
+}
+
 std::optional<std::uint32_t> ScspRuntime::read(core::Address address,
                                                std::uint8_t width) const {
     if (width != 1U && width != 2U && width != 4U) {
@@ -29,6 +151,7 @@ std::optional<std::uint32_t> ScspRuntime::read(core::Address address,
         return readBytes(ram_, static_cast<std::size_t>(address - kRamBase), width);
     }
     if (inRange(address, kRegistersBase, kRegistersSize)) {
+        if (driver_) return driver_->readRegister(address - kRegistersBase, width);
         return readBytes(registers_, static_cast<std::size_t>(address - kRegistersBase),
                          width);
     }
@@ -42,11 +165,23 @@ bool ScspRuntime::write(core::Address address, std::uint8_t width,
     }
     value &= widthMask(width);
     if (inRange(address, kRamBase, kRamSize)) {
+        const auto previousStatus = ram_[kCommandStatus - kRamBase];
         writeBytes(ram_, static_cast<std::size_t>(address - kRamBase), width, value);
+        if (driver_ && (previousStatus & 0x80U) == 0U &&
+            (ram_[kCommandStatus - kRamBase] & 0x80U) != 0U) {
+            const auto host = static_cast<std::size_t>(readBytes(ram_, 0x404U, 4U));
+            if (host >= 0x500U && host <= ram_.size() - 0x100U)
+                for (std::size_t packet = host; packet < host + 0x80U; packet += 16U)
+                    if (ram_[packet] != 0U) ++stats_.soundCommands[ram_[packet]];
+        }
         return true;
     }
     if (inRange(address, kRegistersBase, kRegistersSize)) {
         const auto offset = static_cast<std::size_t>(address - kRegistersBase);
+        if (driver_) {
+            driver_->writeRegister(static_cast<std::uint32_t>(offset), width, value);
+            return true;
+        }
         writeBytes(registers_, offset, width, value);
         if (offset == 0x400U) {
             const auto mask = value;
@@ -104,7 +239,7 @@ void ScspRuntime::onSchedulerTick(sir::MachineState& state) {
     // The game sets bit 7 at 0x25A004E0 and waits for acknowledgement.
     // PCM commands are decoded here; playback advances on the audio clock.
     const auto commandOffset = static_cast<std::size_t>(kCommandStatus - kRamBase);
-    if (commandOffset < ram_.size() && (ram_[commandOffset] & 0x80U) != 0U) {
+    if (!driver_ && commandOffset < ram_.size() && (ram_[commandOffset] & 0x80U) != 0U) {
         serviceSoundCommands();
         ram_[commandOffset] = static_cast<std::uint8_t>(ram_[commandOffset] & 0x7FU);
     }
@@ -288,6 +423,27 @@ void ScspRuntime::renderAudioFrame(std::size_t samplesPerChannel) {
     lastAudioFrame_.channels = kAudioChannels;
     lastAudioFrame_.sequence = ++audioSequence_;
     lastAudioFrame_.samples.assign(samplesPerChannel * kAudioChannels, 0.0F);
+    if (driver_) {
+        for (std::size_t sample = 0; sample < samplesPerChannel; ++sample) {
+            const auto stereo = driver_->renderSample();
+            lastAudioFrame_.samples[sample * 2U] = stereo[0];
+            lastAudioFrame_.samples[sample * 2U + 1U] = stereo[1];
+        }
+        stats_.activeVoices = static_cast<std::uint32_t>(driver_->synth.activeVoiceCount());
+        const auto& slots = driver_->synth.stats();
+        stats_.slotKeyOns = slots.keyOns;
+        stats_.slotKeyOffs = slots.keyOffs;
+        stats_.unsupportedDspSamples = slots.unsupportedDspSamples;
+        stats_.unsupportedLfoSamples = slots.unsupportedLfoSamples;
+        stats_.unsupportedFmSamples = slots.unsupportedFmSamples;
+        stats_.unsupportedSourceSamples = slots.unsupportedSourceSamples;
+        stats_.slotOutOfRangeSamples = slots.outOfRangeSamples;
+        ++stats_.audioFrames;
+        stats_.audioSamples += samplesPerChannel;
+        audioPending_ = true;
+        if (audioSink_) audioSink_(lastAudioFrame_);
+        return;
+    }
     std::uint32_t active{};
     for (const auto& voice : voices_) active += voice.active ? 1U : 0U;
     for (const auto& stream : pcmStreams_) active += stream.active ? 1U : 0U;

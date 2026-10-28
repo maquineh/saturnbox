@@ -7,7 +7,9 @@
 #include <array>
 #include <chrono>
 #include <functional>
+#include <memory>
 #include <optional>
+#include <stdexcept>
 #include <vector>
 
 namespace saturn::sir {
@@ -22,6 +24,14 @@ namespace saturn::platform {
 // scheduler block boundaries.
 class ScspRuntime final {
 public:
+    class DriverError final : public std::runtime_error {
+    public:
+        using std::runtime_error::runtime_error;
+    };
+    ScspRuntime();
+    ~ScspRuntime();
+    ScspRuntime(const ScspRuntime&) = delete;
+    ScspRuntime& operator=(const ScspRuntime&) = delete;
     static constexpr core::Address kRamBase = 0x05A00000U;
     static constexpr std::size_t kRamSize = 0x80000U;
     // The SH-2 sound driver uses this byte as a level-triggered command
@@ -62,7 +72,19 @@ public:
         std::uint64_t pcmRejectedStarts{};
         std::array<std::uint64_t, 256> soundCommands{};
         std::array<std::uint32_t, 4> lastPcmStart{};
+        std::uint64_t driverCycles{}, driverResets{}, driverRegisterWrites{};
+        std::uint32_t driverPc{};
+        std::uint64_t driverUnmappedReads{}, driverUnmappedWrites{}, slotKeyOns{}, slotKeyOffs{};
+        std::uint64_t unsupportedDspSamples{}, unsupportedLfoSamples{}, unsupportedFmSamples{};
+        std::uint64_t unsupportedSourceSamples{}, slotOutOfRangeSamples{};
     };
+
+    // Optional real 68000 + hardware slot path. Must be selected before
+    // loading/starting the guest sound system; HLE remains the default.
+    [[nodiscard]] static bool driverCpuAvailable() noexcept;
+    [[nodiscard]] bool enableDriverCpu();
+    [[nodiscard]] bool driverCpuEnabled() const noexcept;
+    void setSoundCpuEnabled(bool enabled) noexcept;
 
     [[nodiscard]] std::optional<std::uint32_t> read(core::Address address,
                                                      std::uint8_t width) const;
@@ -94,6 +116,9 @@ private:
                            std::uint8_t width, std::uint32_t value) noexcept;
     void renderAudioFrame(std::size_t samplesPerChannel);
     void serviceSoundCommands();
+    struct DriverBackend;
+    std::unique_ptr<DriverBackend> driver_;
+    bool soundCpuEnabled_{};
 
     // Sega sound-driver ABI, not an emulation of the 68K instruction stream.
     struct PcmStream {

@@ -21,8 +21,10 @@ The latest player-route evidence is from 2026-10-27:
   [live debugger](pt-BR/LIVE-DEBUGGER.md) records eight pre/post frames,
   framebuffer phases, memory, input and audio counters on F8 or a file request.
   An [isolated SCSP driver probe](pt-BR/SCSP-DRIVER-PROBE.md) executes the real
-  68000 driver, including timer IRQs and a verified volume command; gameplay
-  effects and slot synthesis remain unfinished.
+  68000 driver, including timer IRQs and a verified volume command. The
+  subsequent optional `--scsp-driver` backend adds direct PCM slots, envelopes
+  and SMPC integration; a 25M-block ISO boot produced audio with 27 key-ons
+  and no SDK errors. Gameplay cue fidelity and DSP remain unvalidated.
 - A recorded live-control session completed the introductory stage and
   advanced into Frost Kibatodos's stage. It confirmed accumulated player
   poses, localized striped sprite corruption, and user-reported pillar

@@ -122,6 +122,7 @@ struct Arguments {
     bool continueAfterExecuteDmp{};
     bool window{};
     bool audioLive{};
+    bool scspDriver{};
     std::string_view renderer{"cpu"};
     bool rendererSpecified{};
     bool frameChangesOnly{};
@@ -2623,6 +2624,7 @@ void usage(std::ostream& stream) {
            << "      [--vdp2-map-trace <directory>]\n"
            << "      [--vdp2-map-read-trace <directory>]\n"
            << "      [--audio-output <wav>]\n"
+           << "      [--scsp-driver] (real 68000 and SCSP slots; requires Musashi build)\n"
            << "      [--aot-entry-output <addresses.txt>] (record resolved SH-2 targets)\n"
            << "      [--aot-module-output <module.cpp>] (emit all SIR blocks discovered in this run)\n"
            << "      [--control-trace <events.csv>] (record scripted pad, SMPC and CD events)\n"
@@ -2860,6 +2862,8 @@ std::optional<Arguments> parseArguments(int argc, char** argv) {
             arguments.window = true;
         } else if (option == "--audio-live") {
             arguments.audioLive = true;
+        } else if (option == "--scsp-driver") {
+            arguments.scspDriver = true;
         } else if (option == "--continue-after-execdmp") {
             arguments.continueAfterExecuteDmp = true;
         } else {
@@ -2903,6 +2907,8 @@ std::optional<Arguments> parseArguments(int argc, char** argv) {
     if (arguments.frameCaptureAfterBlocks && !arguments.frameDirectory) return std::nullopt;
     if (arguments.debugSessionDirectory &&
         (arguments.command != "boot" && arguments.command != "launch")) return std::nullopt;
+    if (arguments.scspDriver && arguments.command != "boot" && arguments.command != "launch")
+        return std::nullopt;
     if (arguments.traceCdSectors && !arguments.frameDirectory) return std::nullopt;
     if (arguments.padLiveAfterBlocks &&
         (!arguments.padSequence || !arguments.window || arguments.padButtons[0] ||
@@ -5685,6 +5691,18 @@ int boot(const Arguments& arguments) {
     mmio.setAccessRecording(arguments.trace ||
         (arguments.frameDirectory.has_value() && !arguments.traceGame &&
          !arguments.frameCaptureAfterBlocks));
+    if (arguments.scspDriver) {
+        try {
+            if (!mmio.scsp().enableDriverCpu()) {
+                std::cerr << "error: --scsp-driver requires a build with SATURNBOX_MUSASHI_68K=ON\n";
+                return 1;
+            }
+        } catch (const std::exception& error) {
+            std::cerr << "error: SCSP driver: " << error.what() << '\n';
+            return 1;
+        }
+    }
+    std::cout << "  SCSP mode: " << (arguments.scspDriver ? "68000 + slots" : "PCM HLE") << '\n';
     mmio.setControlTraceEnabled(arguments.controlTraceOutput.has_value());
     mmio.setControlTraceStartStep(arguments.controlTraceFromStep.value_or(0U));
     mmio.setControlTraceOreg2Only(arguments.controlTraceOreg2Only);
@@ -5852,6 +5870,7 @@ int boot(const Arguments& arguments) {
         config << "compiler_build_stamp=" << __DATE__ << ' ' << __TIME__ << '\n'
                << "renderer=" << (vdp1Renderer ? "vulkan" : "cpu") << '\n'
                << "vblank_blocks=" << arguments.vblankPeriodBlocks << '\n'
+               << "scsp_driver=" << arguments.scspDriver << '\n'
                << "aip=" << arguments.input.string() << '\n'
                << "program=" << (arguments.program ? arguments.program->string() : "") << '\n'
                << "disc=" << (arguments.discImage ? arguments.discImage->string() : "") << '\n'
@@ -5874,7 +5893,10 @@ int boot(const Arguments& arguments) {
         const auto& sound = mmio.scsp().stats();
         std::ostringstream stats;
         stats << "frames=" << sound.audioFrames << ";samples=" << sound.audioSamples
-              << ";voices=" << sound.activeVoices << ";pcm_starts=" << sound.pcmStarts;
+              << ";voices=" << sound.activeVoices << ";pcm_starts=" << sound.pcmStarts
+              << ";driver_cycles=" << sound.driverCycles << ";driver_pc=" << sound.driverPc;
+        stats << ";slot_key_ons=" << sound.slotKeyOns << ";dsp_samples=" << sound.unsupportedDspSamples
+              << ";lfo_samples=" << sound.unsupportedLfoSamples << ";fm_samples=" << sound.unsupportedFmSamples;
         for (const auto command : {0x01U, 0x05U, 0x08U, 0x0EU, 0x85U, 0x86U, 0x87U, 0x8AU})
             stats << ";cmd_" << std::hex << command << '=' << std::dec << sound.soundCommands[command];
         if (realtime) {
@@ -6453,6 +6475,10 @@ int boot(const Arguments& arguments) {
         execution = saturn::sir::ProgramExecutor{}.run(module.blockAt(entry), state, options);
     } catch (const FrontendQuit&) {
         execution.status = saturn::sir::ProgramStatus::FrontendQuit;
+        execution.address = state.readState(saturn::sir::kProgramCounterStateSlot);
+    } catch (const saturn::platform::ScspRuntime::DriverError& error) {
+        std::cerr << "error: sound CPU: " << error.what() << '\n';
+        execution.status = saturn::sir::ProgramStatus::InterpreterFailure;
         execution.address = state.readState(saturn::sir::kProgramCounterStateSlot);
     } catch (const SlaveExecutionFailure& failure) {
         std::cerr << "error: slave SH-2 execution failed at "
@@ -7192,6 +7218,19 @@ int boot(const Arguments& arguments) {
               << ", active-voices=" << scspStats.activeVoices
               << ", pcm-starts=" << scspStats.pcmStarts
               << ", pcm-status-updates=" << scspStats.pcmStatusUpdates << '\n';
+    if (mmio.scsp().driverCpuEnabled())
+        std::cout << "  SCSP driver: cycles=" << scspStats.driverCycles << ", pc="
+                  << saturn::sh2::formatAddress(scspStats.driverPc)
+                  << ", resets=" << scspStats.driverResets << ", register-writes=" << scspStats.driverRegisterWrites
+                  << ", key-ons=" << scspStats.slotKeyOns << ", key-offs=" << scspStats.slotKeyOffs
+                  << ", unmapped=" << scspStats.driverUnmappedReads << '/' << scspStats.driverUnmappedWrites
+                  << ", unsupported-source=" << scspStats.unsupportedSourceSamples
+                  << ", unsupported-dsp=" << scspStats.unsupportedDspSamples
+                  << ", unsupported-lfo=" << scspStats.unsupportedLfoSamples
+                  << ", unsupported-fm=" << scspStats.unsupportedFmSamples
+                  << ", out-of-range=" << scspStats.slotOutOfRangeSamples
+                  << ", sdk-error-bits=" << saturn::sh2::formatAddress(mmio.scsp().read(
+                        saturn::platform::ScspRuntime::kRamBase + 0x420U, 4U).value_or(0U)) << '\n';
     // Keep the final SCSP host/status bytes visible when an FMV reaches its
     // last descriptor but the guest does not return to the title loop.  The
     // guest compares host+0xA0 status bytes against its cache at 0x0606E608;

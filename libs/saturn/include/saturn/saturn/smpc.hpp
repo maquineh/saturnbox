@@ -68,6 +68,7 @@ public:
     void clearResetRequested() noexcept;
     [[nodiscard]] bool slaveEnabled() const noexcept { return slaveEnabled_; }
     [[nodiscard]] std::uint64_t slaveResetGeneration() const noexcept { return slaveResetGeneration_; }
+    [[nodiscard]] bool soundCpuEnabled() const noexcept { return soundCpuEnabled_; }
 
 private:
     void executeCommand(std::uint8_t command);
@@ -90,6 +91,7 @@ private:
     bool intbackStatusPhase_{};
     bool interruptRequested_{};
     bool slaveEnabled_{};
+    bool soundCpuEnabled_{};
     std::uint64_t slaveResetGeneration_{};
 };
 
