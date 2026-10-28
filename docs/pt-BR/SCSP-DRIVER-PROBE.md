@@ -244,11 +244,13 @@ As cinco pendências desta lista foram investigadas. Resultado por item:
    bytes, fluxo de eventos a partir de `0x10`, despachante em PC `0x57B8`,
    papéis de opcode/operando vindos do trace de leitura) e as 113 entradas foram
    executadas pelo driver real, com WAV e catálogo acústico em
-   [SCSP-SEQUENCE-ANALYSIS.md](SCSP-SEQUENCE-ANALYSIS.md). A identificação
-   nominal (tiro, dash, WARNING, explosão) **não** foi fechada: depende da
-   imagem do disco, que não existia na máquina (`H:\Isos` ausente). O catálogo
-   entrega os candidatos (11 efeitos curtos e brilhantes) e o comando exato que
-   o jogo emitiu em combate.
+   [SCSP-SEQUENCE-ANALYSIS.md](SCSP-SEQUENCE-ANALYSIS.md). A fase também rodou
+   com o driver real (`--scsp-driver --audio-output --scsp-requests`): 205M de
+   blocos, 473 key-ons, 244 s de áudio e 424 pedidos `01` gravados com o passo
+   do scheduler. A correlação gatilho→pedido identificou o disparo (`b2 s2`,
+   `b2 s3`, `b2 s6` no controle 3, 12–25 ms após B), o dash (`b1 s4`, controle
+   2) e o salto (`b0 s19`, controle 0). **WARNING e explosão continuam em
+   aberto**: a rota não chega ao chefe nem garante destruir inimigos.
 3. **Noise/LFO nos bancos do jogo.** Medido, não inferido: 113 entradas, duas
    rodadas de controle (3 e 6), **0** amostras de noise, **0** de LFO de pitch
    ou amplitude, **0** de modulação e **0** de DSP. O trace de escritas mostra o
@@ -256,10 +258,12 @@ As cinco pendências desta lista foram investigadas. Resultado por item:
 4. **Interleaving do 68000.** Deixou de ser uma rajada de 256 ciclos por
    amostra: `onBlockTick` adianta o CPU de som pela fração de ciclos devida em
    cada passo do scheduler (`188.160` ciclos por quadro distribuídos), então
-   com 14.000 passos/quadro cada passo roda ~13,4 ciclos, e com 7.350 passos
-   ~25,6. O total continua exatamente 256 ciclos por amostra (o VBlank fecha a
-   conta). A granularidade agora é a instrução do 68000 dentro do passo, não o
-   quadro.
+   com 14.000 passos/quadro o orçamento é ~13,4 ciclos por passo, e com 7.350
+   passos ~25,6. O total continua exatamente 256 ciclos por amostra (o VBlank
+   fecha a conta). Para não pagar uma chamada do core por passo, o adiantamento
+   só acontece quando acumula 64 ciclos (`kSoundCpuChunkCycles`), ou seja, a
+   granularidade real é ~1/4 de amostra por execução — muito menor que o quadro
+   e ainda dentro da instrução do 68000.
 5. **MIDI e DMA do SCSP.** Implementados. O DMA (`0x412`–`0x417`) copia palavras
    entre a RAM de som e a janela de registradores nos dois sentidos, com modo
    *gate* (zerar o destino), `DEXE` limpo ao final, contagem de palavras
@@ -273,10 +277,13 @@ As cinco pendências desta lista foram investigadas. Resultado por item:
 
 ### Pendências restantes
 
-- Identificação nominal dos efeitos na fase, com a imagem do disco e o
-  debugger/OBS (ver item 2 acima).
-- O interleaving é por passo do scheduler mais a instrução do 68000; ainda não
-  é ciclo a ciclo do barramento.
+- WARNING e explosão na fase: a rota validada cobre o começo do estágio, sem
+  chefe e sem garantir inimigos destruídos. Tiro, dash e salto já estão
+  identificados pelo gatilho (item 2).
+- O interleaving é por passo do scheduler com execução a cada 64 ciclos; ainda
+  não é ciclo a ciclo do barramento.
 - O DMA usa a última imagem de RAM conhecida; um pedido antes da primeira
   amostra é adiado para a próxima, não rejeitado.
 - O MIDI não modela 31.250 baud nem handshake externo.
+- A captura da fase satura em 1,0 em vários trechos, o que impede casar a forma
+  de onda do efeito com o WAV offline; uma captura com MVOL menor permitiria.

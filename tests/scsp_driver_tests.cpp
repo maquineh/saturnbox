@@ -20,6 +20,32 @@ void smpcControlsTheSoundCpu() {
     REQUIRE(!mmio.smpc().soundCpuEnabled());
 }
 
+void hostQueueSequenceRequestsAreRecorded() {
+    using Sound = saturn::platform::ScspRuntime;
+    Sound sound;
+    // Host queue pointer, then a sequence-start packet in slot 3.
+    REQUIRE(sound.write(Sound::kRamBase + 0x404U, 4, 0x700U));
+    const auto packet = 0x700U + 3U * 16U;
+    REQUIRE(sound.write(Sound::kRamBase + packet, 1, 0x01U));
+    REQUIRE(sound.write(Sound::kRamBase + packet + 2U, 1, 3U));
+    REQUIRE(sound.write(Sound::kRamBase + packet + 3U, 1, 2U));
+    REQUIRE(sound.write(Sound::kRamBase + packet + 4U, 1, 11U));
+    // The batch header packet at 0x700 carries no command.
+    REQUIRE(sound.write(Sound::kRamBase + 0x700U, 1, 0x00U));
+    // Raising the handshake bit is what makes the runtime look at the queue.
+    REQUIRE(sound.write(Sound::kCommandStatus, 1, 0x80U));
+    const auto& stats = sound.stats();
+    REQUIRE(stats.sequenceRequests == 1U);
+    REQUIRE(stats.lastSequenceRequests.size() == 1U);
+    const auto& request = stats.lastSequenceRequests[0];
+    REQUIRE(request.command == 0x01U);
+    REQUIRE(request.control == 3U);
+    REQUIRE(request.bank == 2U);
+    REQUIRE(request.sequence == 11U);
+    REQUIRE(request.schedulerTick == 0U);
+    REQUIRE(sound.stats().schedulerSteps == 0U);
+}
+
 void audioClockFollowsSchedulerBlocks() {
     using Sound = saturn::platform::ScspRuntime;
     Sound sound;
@@ -183,6 +209,7 @@ void realDriverWritesSlotsAndProducesPcm() {
 void registerScspDriverTests(test::Registry& registry) {
     registry.add("SCSP: SMPC sound CPU on and off", smpcControlsTheSoundCpu);
     registry.add("SCSP: audio clock advances with scheduler blocks", audioClockFollowsSchedulerBlocks);
+    registry.add("SCSP: host queue sequence requests are recorded", hostQueueSequenceRequestsAreRecorded);
 #ifdef SATURNBOX_HAS_M68K
     registry.add("SCSP: sound CPU executes inside the audio frame", soundCpuRunsInsideTheFrame);
     registry.add("SCSP: sound CPU advances in sub-sample chunks", soundCpuAdvancesInSubSampleChunks);

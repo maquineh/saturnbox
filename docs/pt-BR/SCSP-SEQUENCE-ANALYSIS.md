@@ -127,20 +127,108 @@ banco 2, sequência 11) corresponde a um som **sustentado** de ~0,4 s, o que é
 compatível com uma trilha curta ou um efeito com cauda, não com um disparo
 seco.
 
-## Limite desta validação
+## Validação na fase (28/10/2026)
 
-Dizer "este é o tiro" ou "este é o WARNING" exige correlacionar uma entrada com
-a ação do jogo. Isso não foi feito aqui: a imagem do disco
-(`H:/Isos/Rockman X4 (J)(Saturn)(ISO).mdf`, caminho padrão do launcher) não
-estava acessível nesta sessão (`H:\Isos` não existe na máquina). Sem rodar a
-fase com o debugger, o máximo que os dados provam é o caráter acústico e a
-mecânica de cada entrada. Para fechar a identificação auditiva é preciso:
+A imagem do disco foi disponibilizada em
+`C:\Users\p001209\Downloads\rockmanx4\Rockman X4 (J)(Saturn)(ISO).mdf` e a rota
+de fase rodou com o driver real e captura de áudio:
 
-1. montar a imagem do disco e rodar `launch_x4_debug.ps1 -ScspDriver`;
-2. capturar o áudio em combate com os contadores `slot_mask` e os pacotes `01`
-   de cada evento (o debugger já publica as contagens de comando);
-3. comparar o `bank:seq` do pacote com o catálogo acima e confirmar com o
-   jogador que o som corresponde ao tiro, ao dash, ao WARNING ou à explosão.
+```powershell
+saturn-sh2 boot build\rockman\aip.bin --aip-base 0x06002E40 `
+  --ip build\rockman\ip.bin --ip-base 0x06002000 `
+  --program build\rockman\0.BIN --program-base 0x06009000 `
+  --entry 0x06002E40 --expected-entry 0x06010000 `
+  --disc 'C:\Users\p001209\Downloads\rockmanx4\Rockman X4 (J)(Saturn)(ISO).mdf' `
+  --disc-sector-size 2448 --continue-after-execdmp `
+  --vblank-blocks 14000 --steps 205000000 --pad-sequence $pad `
+  --renderer cpu --scsp-driver `
+  --audio-output build-scsp\tmp-test\stage-gameplay.wav `
+  --scsp-requests build-scsp\tmp-test\stage-requests.csv
+```
+
+Resultado da execução (`status: step-limit`, 205.000.000 de blocos):
+
+| métrica | valor |
+| --- | --- |
+| frames de áudio | 14.642 |
+| amostras | 10.761.870 (244,03 s) |
+| ciclos do 68000 | 2.754.142.326 |
+| key-ons / key-offs | 473 / 336 |
+| escritas em registradores | 419.849 |
+| `noise` / `lfo` / `fm` / `dsp-steps` | 0 / 0 / 0 / 0 |
+| pedidos de sequência (`01`) | 424 |
+
+O `saturn-sh2` passou a gravar cada pacote `01` com o passo do scheduler
+(`--scsp-requests`), o que permite alinhar o pedido ao quadro de áudio: com
+14.000 passos por quadro e 735 amostras, o tempo é `passo / 840.000` s.
+
+### Efeitos identificados pelo gatilho
+
+Os pressionamentos roteirizados foram comparados com o pedido mais próximo
+(`tools/diagnostics/probe_x4_gameplay_onsets.py`, que também grava uma janela
+WAV por pressionamento):
+
+| botão | passo | tempo | pedido mais próximo | atraso |
+| --- | --- | --- | --- | --- |
+| B | 160.000.000 | 190,476 s | `c3 b2 s3` | +25,0 ms |
+| B | 168.000.000 | 200,000 s | `c3 b2 s2` | +18,9 ms |
+| B | 180.000.000 | 214,286 s | `c3 b2 s2` | +21,3 ms |
+| B | 184.000.000 | 219,048 s | `c3 b2 s3` | +20,9 ms |
+| B | 188.000.000 | 223,810 s | `c3 b2 s6` | +14,0 ms |
+| B | 192.000.000 | 228,571 s | `c3 b2 s2` | +12,4 ms |
+| B | 196.000.000 | 233,333 s | `c3 b2 s3` | +24,7 ms |
+| C | 174.000.000 | 207,143 s | `c2 b1 s4` | +35,8 ms |
+| A | 178.000.000 | 211,905 s | `c0 b0 s19` | +18,7 ms |
+| A | 186.000.000 | 221,429 s | `c0 b0 s19` | +19,2 ms |
+
+O padrão é inequívoco: **B (disparo) pede as sequências `b2 s2`, `b2 s3` ou
+`b2 s6` no controle 3**, com 12–25 ms de atraso, o que é menos de dois quadros
+(e portanto coerente com o polling do pad pela SH-2). **C (dash) pede `b1 s4`
+no controle 2** e **A (salto) pede `b0 s19` no controle 0**, os dois com ~19–36
+ms. Onde o pressionamento caiu junto de outro evento, o pedido mais próximo foi
+outro (`b1 s0`, `b0 s1`, `b3 s2`, `b0 s10`), como esperado em combate.
+
+Cada pressionamento tem uma janela WAV em
+`build-scsp/tmp-test/gameplay-onsets/windows/`, com o pico e o fluxo espectral
+medidos no CSV ao lado, para escuta direta.
+
+### O que este teste prova e o que não prova
+
+- Prova que, na fase, o driver real está tocando: 473 key-ons, 2,75 bilhões de
+  ciclos do 68000 e 244 s de áudio não silencioso, com `noise`, `lfo`, `fm` e
+  `dsp` em zero também aqui.
+- Prova que o disparo, o dash e o salto pedem sequências distintas e
+  determinísticas, com latência de 12–36 ms. Isso identifica **quais** entradas
+  são o tiro, o dash e o salto; não depende de escuta.
+- **Não** identifica WARNING nem explosão: a rota cobre ~80 s de fase e não
+  chega ao chefe nem garante destruir inimigos. Faltam esses dois eventos.
+- A tentativa de casar a forma de onda da janela capturada com o WAV offline
+  (`match_x4_cues.py`) deu correlação baixa: a captura satura em 1,0 em vários
+  trechos (mistura de música e efeitos) e o casamento por perfil espectral
+  (`analyze_x4_gameplay_audio.py`) não separa uma voz da cama musical. Os dois
+  scripts ficam como registro do método e da limitação.
+
+### Próximo passo para WARNING e explosão
+
+Estender a rota até o chefe (mais blocos, com dash e salto no caminho) e
+capturar o intervalo do WARNING e das explosões de inimigos, repetindo a
+correlação input→pedido que funcionou para o tiro. Alternativa mais curta:
+usar um estado salvo na porta do chefe.
+
+## Limites restantes
+
+O que ainda falta, depois da validação na fase:
+
+- WARNING e explosão não foram exercitados pela rota (ela cobre a primeira
+  parte da fase, sem chefe e sem garantir inimigos destruídos). O método que
+  funcionou para o tiro deve ser repetido nesses dois momentos.
+- A identificação de "tiro", "dash" e "salto" vem do gatilho (botão → pedido),
+  não de uma comparação acústica. É uma inferência forte e reprodutível, mas
+  ainda não é a confirmação auditiva humana; as janelas WAV por pressionamento
+  permitem essa escuta.
+- O casamento por forma de onda fica inviável enquanto a captura saturar em
+  1,0; uma captura com MVOL menor (ou sem a música) permitiria a comparação
+  exata.
 
 ## Reprodução
 
@@ -167,4 +255,11 @@ python tools\diagnostics\catalog_x4_sequence_audio.py `
   --scan build-scsp\tmp-test\sequence-scan\sequence-scan.csv `
   --wav-dir build-scsp\tmp-test\sequence-scan\wav `
   --out build-scsp\tmp-test\sequence-catalog
+
+# 5. janelas e onset de cada pressionamento na fase (precisa de numpy)
+python tools\diagnostics\probe_x4_gameplay_onsets.py `
+  --audio build-scsp\tmp-test\stage-gameplay.wav `
+  --requests build-scsp\tmp-test\stage-requests.csv `
+  --presses 160000000:b,174000000:c,178000000:a `
+  --out build-scsp\tmp-test\gameplay-onsets
 ```

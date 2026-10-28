@@ -194,12 +194,19 @@ bool ScspRuntime::write(core::Address address, std::uint8_t width,
     if (inRange(address, kRamBase, kRamSize)) {
         const auto previousStatus = ram_[kCommandStatus - kRamBase];
         writeBytes(ram_, static_cast<std::size_t>(address - kRamBase), width, value);
-        if (driver_ && (previousStatus & 0x80U) == 0U &&
+        // The host raises bit 7 of 0x4E0 once a command batch is queued. Record
+        // the sequence-start packets here: the bank and sequence number are what
+        // identifies a cue, and the step counter aligns them with input.
+        if ((previousStatus & 0x80U) == 0U &&
             (ram_[kCommandStatus - kRamBase] & 0x80U) != 0U) {
             const auto host = static_cast<std::size_t>(readBytes(ram_, 0x404U, 4U));
-            if (host >= 0x500U && host <= ram_.size() - 0x100U)
-                for (std::size_t packet = host; packet < host + 0x80U; packet += 16U)
-                    if (ram_[packet] != 0U) ++stats_.soundCommands[ram_[packet]];
+            if (host >= 0x500U && host <= ram_.size() - 0x100U) {
+                for (std::size_t packet = host; packet < host + 0x80U; packet += 16U) {
+                    if (ram_[packet] == 0U) continue;
+                    if (driver_) ++stats_.soundCommands[ram_[packet]];
+                    if (ram_[packet] == 0x01U) recordSequenceRequest(packet);
+                }
+            }
         }
         return true;
     }
@@ -411,12 +418,28 @@ void ScspRuntime::setAudioFrameBlocks(std::size_t blocksPerFrame) noexcept {
     frameSoundCpuCycles_ = 0;
 }
 
-void ScspRuntime::advanceSoundCpu(std::uint64_t targetCycles) {
+void ScspRuntime::advanceSoundCpu(std::uint64_t targetCycles, bool flush) {
     if (!driver_ || frameSoundCpuCycles_ >= targetCycles) return;
-    frameSoundCpuCycles_ += driver_->runCpu(targetCycles - frameSoundCpuCycles_);
+    const auto due = targetCycles - frameSoundCpuCycles_;
+    if (!flush && due < kSoundCpuChunkCycles) return;
+    frameSoundCpuCycles_ += driver_->runCpu(due);
+}
+
+void ScspRuntime::recordSequenceRequest(std::size_t packet) {
+    ++stats_.sequenceRequests;
+    if (stats_.lastSequenceRequests.size() >= Stats::kMaxSequenceRequests)
+        stats_.lastSequenceRequests.erase(stats_.lastSequenceRequests.begin());
+    Stats::SequenceRequest request;
+    request.schedulerTick = stats_.schedulerSteps;
+    request.command = ram_[packet];
+    request.control = ram_[packet + 2U];
+    request.bank = ram_[packet + 3U];
+    request.sequence = ram_[packet + 4U];
+    stats_.lastSequenceRequests.push_back(request);
 }
 
 void ScspRuntime::onBlockTick() {
+    ++stats_.schedulerSteps;
     if (!blockClockActive()) return;
     constexpr auto kSamplesPerVideoFrame = kAudioSampleRate / 60U;
     // Saturn's sound CPU is clocked 256 times per 44.1 kHz sample.
@@ -460,7 +483,7 @@ void ScspRuntime::onVBlank() {
             renderSamples(kSamplesPerVideoFrame - frameSampleCount_);
         }
         // Finish the exact 256-cycles-per-sample budget for this frame.
-        advanceSoundCpu(kSoundCyclesPerFrame);
+        advanceSoundCpu(kSoundCyclesPerFrame, true);
         finishAudioFrame();
         audioFrameOpen_ = false;
         frameBlockCount_ = 0;
@@ -493,8 +516,7 @@ void ScspRuntime::onVBlank() {
     renderAudioFrame(std::max<std::size_t>(samples, 1U));
 }
 
-bool ScspRuntime::consumeAudio(AudioFrame& output) {
-    if (!audioPending_) return false;
+bool ScspRuntime::consumeAudio(AudioFrame& output) {    if (!audioPending_) return false;
     output = std::move(lastAudioFrame_);
     audioPending_ = false;
     return true;

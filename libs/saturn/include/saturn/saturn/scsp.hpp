@@ -61,6 +61,17 @@ public:
     static constexpr core::Address kRequest1 = 0x0605E79AU;
 
     struct Stats {
+        // Sound command packet captured from the host queue, in order. Only the
+        // sequence-start command (0x01) is recorded: it carries the bank and
+        // sequence number, which is what identifies a cue.
+        struct SequenceRequest {
+            std::uint64_t schedulerTick{};
+            std::uint8_t command{};
+            std::uint8_t control{};
+            std::uint8_t bank{};
+            std::uint8_t sequence{};
+        };
+        static constexpr std::size_t kMaxSequenceRequests = 4096;
         std::uint64_t schedulerTicks{};
         std::uint64_t requests{};
         std::uint64_t completions{};
@@ -80,6 +91,11 @@ public:
         // synthesized; these counters show how often each path is used.
         std::uint64_t noiseSamples{}, pitchLfoSamples{}, amplitudeLfoSamples{};
         std::uint64_t fmSamples{}, dspSendSamples{}, dspEffectSamples{}, dspSteps{};
+        std::uint64_t sequenceRequests{}; // Total 0x01 packets, even beyond the ring.
+        std::vector<SequenceRequest> lastSequenceRequests;
+        // Scheduler steps elapsed, the same unit --pad-sequence uses. Recorded
+        // with each request so a capture can be aligned to scripted input.
+        std::uint64_t schedulerSteps{};
         std::uint64_t unsupportedSourceSamples{}, slotOutOfRangeSamples{};
         // SCSP DMA and MIDI activity.
         std::uint64_t dmaTransfers{}, dmaWords{}, midiBytesOut{}, midiBytesIn{};
@@ -136,8 +152,12 @@ private:
     void renderSamples(std::size_t count);
     void finishAudioFrame();
     // Sound-CPU time advances with the audio clock: `targetCycles` is the
-    // absolute per-frame budget reached at the current scheduler step.
-    void advanceSoundCpu(std::uint64_t targetCycles);
+    // absolute per-frame budget reached at the current scheduler step. Chunks
+    // smaller than kSoundCpuChunkCycles wait for the next step (or for the
+    // VBlank flush) so a 14,000-step frame does not cost 14,000 core calls.
+    static constexpr std::uint64_t kSoundCpuChunkCycles = 64;
+    void advanceSoundCpu(std::uint64_t targetCycles, bool flush = false);
+    void recordSequenceRequest(std::size_t packet);
     [[nodiscard]] bool blockClockActive() const noexcept {
         return audioFrameBlocks_ != 0U && !realtimeAudioClock_;
     }

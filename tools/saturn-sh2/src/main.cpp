@@ -81,6 +81,7 @@ struct Arguments {
     std::optional<std::filesystem::path> vdp2MapTrace;
     std::optional<std::filesystem::path> vdp2MapReadTrace;
     std::optional<std::filesystem::path> audioOutput;
+    std::optional<std::filesystem::path> scspRequestsOutput;
     std::optional<std::filesystem::path> aotEntryOutput;
     std::optional<std::filesystem::path> aotModuleOutput;
     std::optional<std::filesystem::path> controlTraceOutput;
@@ -2694,6 +2695,7 @@ std::optional<Arguments> parseArguments(int argc, char** argv) {
              option == "--audio-output" || option == "--renderer" ||
              option == "--aot-entry-output" ||
              option == "--aot-module-output" ||
+              option == "--scsp-requests" ||
               option == "--control-trace" ||
               option == "--x4-player-samples" ||
               option == "--control-trace-from-step" ||
@@ -2754,6 +2756,8 @@ std::optional<Arguments> parseArguments(int argc, char** argv) {
             arguments.rendererSpecified = true;
         } else if (option == "--audio-output") {
             arguments.audioOutput = std::filesystem::path(argv[++index]);
+        } else if (option == "--scsp-requests") {
+            arguments.scspRequestsOutput = std::filesystem::path(argv[++index]);
         } else if (option == "--aot-entry-output") {
             arguments.aotEntryOutput = std::filesystem::path(argv[++index]);
         } else if (option == "--aot-module-output") {
@@ -7279,6 +7283,26 @@ int boot(const Arguments& arguments) {
                                                saturn::platform::ScspRuntime::kAudioChannels));
         std::cout << "  audio output: " << arguments.audioOutput->string()
                   << (audioWriteFailure ? " (write-error)" : "") << '\n';
+    }
+    // Sequence-start packets seen on the host mailbox, in order. Each row is a
+    // cue the game requested; the step column aligns it with scripted input and
+    // the captured audio.
+    if (arguments.scspRequestsOutput) {
+        std::ofstream requests(*arguments.scspRequestsOutput, std::ios::trunc);
+        const auto& sound = mmio.scsp().stats();
+        if (!requests) {
+            std::cout << "  SCSP requests: write-error\n";
+        } else {
+            requests << "step,command,control,bank,sequence\n";
+            for (const auto& request : sound.lastSequenceRequests)
+                requests << request.schedulerTick << ',' << static_cast<unsigned>(request.command)
+                         << ',' << static_cast<unsigned>(request.control)
+                         << ',' << static_cast<unsigned>(request.bank)
+                         << ',' << static_cast<unsigned>(request.sequence) << '\n';
+            std::cout << "  SCSP sequence requests: " << sound.sequenceRequests << " total, "
+                      << sound.lastSequenceRequests.size() << " recorded to "
+                      << arguments.scspRequestsOutput->string() << '\n';
+        }
     }
     if (execution.status == saturn::sir::ProgramStatus::UnresolvedTarget) {
         std::cout << "  unresolved target: "
