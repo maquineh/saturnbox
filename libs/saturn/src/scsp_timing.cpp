@@ -62,6 +62,56 @@ void ScspTiming::advanceSamples(std::uint64_t count) noexcept {
     for (std::size_t index = 0; index < stats_.timers.size(); ++index) {
         advanceTimer(index, count);
     }
+    // Drain the MIDI output FIFO one byte per sample. A real transmitter sends
+    // 31250 baud; without a device attached the FIFO only has to empty fast
+    // enough that the driver never sees it blocked.
+    for (std::uint64_t byte = 0; byte < count; ++byte) {
+        if (midiOutputCount_ == 0U) break;
+        midiOutputRead_ = static_cast<std::uint8_t>((midiOutputRead_ + 1U) % kMidiFifoSize);
+        --midiOutputCount_;
+    }
+}
+
+void ScspTiming::pushMidiInput(std::uint8_t byte) noexcept {
+    if (midiInputCount_ >= kMidiFifoSize) {
+        midiInputOverflow_ = true;
+        ++stats_.midiOverflows;
+        return;
+    }
+    midiInput_[midiInputWrite_] = byte;
+    midiInputWrite_ = static_cast<std::uint8_t>((midiInputWrite_ + 1U) % kMidiFifoSize);
+    ++midiInputCount_;
+    ++stats_.midiBytesIn;
+    setPendingBit(kMidiPendingBit, true);
+}
+
+std::size_t ScspTiming::midiInputPending() const noexcept {
+    return midiInputCount_;
+}
+
+std::uint8_t ScspTiming::takeMidiOutput() noexcept {
+    if (midiOutputCount_ == 0U) return 0U;
+    const auto value = midiOutput_[midiOutputRead_];
+    midiOutputRead_ = static_cast<std::uint8_t>((midiOutputRead_ + 1U) % kMidiFifoSize);
+    --midiOutputCount_;
+    return value;
+}
+
+void ScspTiming::setPendingBit(std::size_t bit, bool pending) const noexcept {
+    if (bit >= 11U) return;
+    const auto mask = static_cast<std::uint16_t>(1U << bit);
+    if (pending) {
+        stats_.interruptPending = static_cast<std::uint16_t>(
+            (stats_.interruptPending | mask) & kPendingMask);
+    } else {
+        stats_.interruptPending = static_cast<std::uint16_t>(
+            stats_.interruptPending & ~mask);
+    }
+}
+
+void ScspTiming::notifyDmaCompletion() noexcept {
+    ++stats_.dmaCompletions;
+    setPendingBit(kDmaPendingBit, true);
 }
 
 std::uint8_t ScspTiming::irqLevel() const noexcept {
@@ -83,10 +133,32 @@ std::uint8_t ScspTiming::irqLevel() const noexcept {
 const ScspTiming::Stats& ScspTiming::stats() const noexcept { return stats_; }
 
 bool ScspTiming::isMapped(std::uint16_t offset) noexcept {
+    if (offset >= kMidiStatus && offset <= kMidiOutput + 1U) return true;
     return offset >= kTimerA && offset <= kScilv2 + 1U;
 }
 
 std::uint8_t ScspTiming::readByte(std::uint16_t offset) const noexcept {
+    if (offset == kMidiStatus || offset == kMidiStatus + 1U) {
+        const auto outCount = static_cast<std::size_t>(midiOutputCount_);
+        const auto inCount = static_cast<std::size_t>(midiInputCount_);
+        std::uint16_t value{};
+        if (outCount >= kMidiFifoSize - 1U) value |= 0x1000U; // MOFULL
+        if (outCount == 0U) value |= 0x0800U;                // MOEMPTY
+        if (midiInputOverflow_) value |= 0x0400U;            // MIOVF
+        if (inCount >= kMidiFifoSize - 1U) value |= 0x0200U; // MIFULL
+        if (inCount == 0U) value |= 0x0100U;                 // MIEMPTY
+        if (inCount != 0U) value |= midiInput_[midiInputRead_];
+        if (offset == kMidiStatus) return static_cast<std::uint8_t>(value >> 8U);
+        // Reading MIBUF consumes the oldest byte and clears the IRQ when empty.
+        if (inCount != 0U) {
+            midiInputRead_ = static_cast<std::uint8_t>(
+                (midiInputRead_ + 1U) % kMidiFifoSize);
+            --midiInputCount_;
+            if (midiInputCount_ == 0U) setPendingBit(kMidiPendingBit, false);
+        }
+        return static_cast<std::uint8_t>(value & 0xFFU);
+    }
+    if (offset == kMidiOutput || offset == kMidiOutput + 1U) return 0U;
     // Timer registers, SCIRE, and SCILV are write-only in the Sega register
     // map, so reads return zero. Timer state remains available in Stats.
     if (offset >= kTimerA && offset <= kTimerC + 1U) return 0U;
@@ -120,6 +192,17 @@ void ScspTiming::writeByte(std::uint16_t offset, std::uint8_t value) noexcept {
             timer.running = timer.count != 0xFFU;
             return;
         }
+    }
+
+    if (offset == kMidiOutput || offset == kMidiOutput + 1U) {
+        // Output FIFO: drop the byte when full instead of blocking the bus.
+        if (midiOutputCount_ >= kMidiFifoSize - 1U) return;
+        midiOutput_[midiOutputWrite_] = value;
+        midiOutputWrite_ = static_cast<std::uint8_t>(
+            (midiOutputWrite_ + 1U) % kMidiFifoSize);
+        ++midiOutputCount_;
+        ++stats_.midiBytesOut;
+        return;
     }
 
     if (offset == kScieb || offset == kScieb + 1U) {

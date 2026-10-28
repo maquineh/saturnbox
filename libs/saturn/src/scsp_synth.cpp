@@ -113,6 +113,14 @@ void ScspSynth::reset() {
     monitor_ = 0x7f; // Release at minimum level.
     noiseState_ = 0x4A3F;
     dsp_.reset();
+    dmaMemory_ = 0;
+    dmaRegister_ = 0;
+    dmaLength_ = 0;
+    dmaDirection_ = false;
+    dmaGate_ = false;
+    dmaActive_ = false;
+    dmaPending_ = false;
+    soundRam_ = {};
     stats_ = {};
 }
 std::uint16_t ScspSynth::word(std::size_t offset) const noexcept {
@@ -140,6 +148,19 @@ bool ScspSynth::write(std::uint32_t offset, std::uint8_t width, std::uint32_t va
         const auto memoryMode = word(0x402);
         dsp_.setRingBuffer(static_cast<std::uint16_t>(memoryMode & 0x3FU),
                            static_cast<std::uint32_t>(8U * 1024U) << ((memoryMode >> 7U) & 3U));
+    }
+    // SCSP DMA: parameter words at 0x412-0x417. Writing DEXE starts the
+    // transfer immediately when the sound-RAM image is already known.
+    if (offset < 0x418U && offset + width > 0x412U) {
+        const auto control = word(0x414);
+        dmaMemory_ = ((static_cast<std::uint32_t>(control) & 0xF000U) << 4U) |
+                     (static_cast<std::uint32_t>(word(0x412)) & 0xFFFEU);
+        dmaRegister_ = static_cast<std::uint32_t>(control) & 0x0FFEU;
+        const auto length = word(0x416);
+        dmaLength_ = static_cast<std::uint32_t>(length) & 0x0FFEU;
+        dmaDirection_ = (length & 0x2000U) != 0U;
+        dmaGate_ = (length & 0x4000U) != 0U;
+        if ((length & 0x1000U) != 0U) requestDma();
     }
     if (offset < 0xEE4U && offset + width > 0x700U) {
         const auto first = static_cast<std::uint16_t>(std::max<std::uint32_t>(offset, 0x700U) & ~1U);
@@ -336,6 +357,11 @@ void ScspSynth::advancePosition(std::size_t index, std::uint32_t step) {
 }
 std::array<float, 2> ScspSynth::renderSample(std::span<std::uint8_t> ram) {
     const auto& tables = lfoTables();
+    soundRam_ = ram;
+    if (dmaPending_) {
+        dmaPending_ = false;
+        executeDma();
+    }
     std::array<float, 2> output{};
     ++stats_.renderedSamples;
     for (std::size_t i = 0; i < slots_.size(); ++i) {
@@ -455,5 +481,62 @@ std::array<float, 2> ScspSynth::renderSample(std::span<std::uint8_t> ram) {
 }
 std::size_t ScspSynth::activeVoiceCount() const noexcept {
     return static_cast<std::size_t>(std::count_if(slots_.begin(), slots_.end(), [](const Slot& slot) { return slot.active; }));
+}
+void ScspSynth::setDmaCompletionHook(std::function<void()> hook) {
+    dmaCompletion_ = std::move(hook);
+}
+std::uint32_t ScspSynth::ramWordAt(std::uint32_t address) const noexcept {
+    if (address + 2U > soundRam_.size()) return 0U;
+    return (static_cast<std::uint32_t>(soundRam_[address]) << 8U) |
+           static_cast<std::uint32_t>(soundRam_[address + 1U]);
+}
+void ScspSynth::requestDma() {
+    // Before the first rendered sample the RAM image is unknown; defer the
+    // transfer so the guest still sees it complete.
+    if (soundRam_.empty()) {
+        dmaPending_ = true;
+        return;
+    }
+    executeDma();
+}
+void ScspSynth::executeDma() {
+    if (dmaActive_) return; // A register write inside the transfer must not recurse.
+    dmaActive_ = true;
+    const auto length = dmaLength_ & 0x0FFEU;
+    auto memory = dmaMemory_ & 0x7FFFEU;
+    auto registerOffset = dmaRegister_ & 0x0FFEU;
+    for (std::uint32_t byte = 0; byte < length; byte += 2U) {
+        if (dmaGate_) {
+            // DGATE clears the destination instead of copying.
+            if (dmaDirection_) {
+                if (memory + 2U <= soundRam_.size()) {
+                    soundRam_[memory] = 0U;
+                    soundRam_[memory + 1U] = 0U;
+                    ++stats_.dmaWords;
+                } else {
+                    ++stats_.dmaDropped;
+                }
+            } else {
+                static_cast<void>(write(registerOffset, 2U, 0U));
+            }
+        } else if (dmaDirection_) {
+            const auto value = read(registerOffset, 2U).value_or(0U);
+            if (memory + 2U <= soundRam_.size()) {
+                soundRam_[memory] = static_cast<std::uint8_t>(value >> 8U);
+                soundRam_[memory + 1U] = static_cast<std::uint8_t>(value & 0xFFU);
+                ++stats_.dmaWords;
+            } else {
+                ++stats_.dmaDropped;
+            }
+        } else {
+            static_cast<void>(write(registerOffset, 2U, ramWordAt(memory)));
+        }
+        memory = (memory + 2U) & 0x7FFFEU;
+        registerOffset = (registerOffset + 2U) & 0x0FFEU;
+    }
+    registers_[0x416] &= static_cast<std::uint8_t>(~0x10U); // Clear DEXE.
+    ++stats_.dmaTransfers;
+    dmaActive_ = false;
+    if (dmaCompletion_) dmaCompletion_();
 }
 } // namespace saturn::platform

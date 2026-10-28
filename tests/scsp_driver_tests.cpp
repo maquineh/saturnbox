@@ -73,6 +73,33 @@ void soundCpuRunsInsideTheFrame() {
 #endif
 
 #ifdef SATURNBOX_HAS_M68K
+void soundCpuAdvancesInSubSampleChunks() {
+    using Sound = saturn::platform::ScspRuntime;
+    Sound sound;
+    REQUIRE(sound.enableDriverCpu());
+    REQUIRE(sound.write(Sound::kRamBase, 4, 0x8000U));
+    REQUIRE(sound.write(Sound::kRamBase + 4U, 4, 0x100U));
+    // BRA.S to itself: the sound CPU keeps running without touching hardware.
+    REQUIRE(sound.write(Sound::kRamBase + 0x100U, 2, 0x60FEU));
+    sound.setSoundCpuEnabled(true);
+    // 7350 scheduler steps per frame: roughly 25.6 sound-CPU cycles per step.
+    sound.setAudioFrameBlocks(7350);
+    for (int step = 0; step < 100; ++step) sound.onBlockTick();
+    const auto early = sound.stats().driverCycles;
+    REQUIRE(early > 0U);
+    // Previously the whole 256-cycle sample ran at once; now the chunks are
+    // an order of magnitude smaller than a sample's worth of cycles.
+    REQUIRE(early < 100U * 256U);
+    REQUIRE(early >= 2000U);
+    sound.onVBlank();
+    // The frame still executes exactly 256 cycles per rendered sample.
+    REQUIRE(sound.stats().driverCycles >= 735U * 256U);
+    REQUIRE(sound.stats().driverCycles < 735U * 256U + 256U);
+    REQUIRE(sound.stats().audioFrames == 1U);
+}
+#endif
+
+#ifdef SATURNBOX_HAS_M68K
 void invalidResetVectorsFailWithoutAcknowledgingCommands() {
     using Sound = saturn::platform::ScspRuntime;
     Sound sound;
@@ -158,6 +185,7 @@ void registerScspDriverTests(test::Registry& registry) {
     registry.add("SCSP: audio clock advances with scheduler blocks", audioClockFollowsSchedulerBlocks);
 #ifdef SATURNBOX_HAS_M68K
     registry.add("SCSP: sound CPU executes inside the audio frame", soundCpuRunsInsideTheFrame);
+    registry.add("SCSP: sound CPU advances in sub-sample chunks", soundCpuAdvancesInSubSampleChunks);
     registry.add("SCSP: invalid reset vectors report an error and can recover", invalidResetVectorsFailWithoutAcknowledgingCommands);
     registry.add("SCSP: real 68000 configures slots and emits PCM", realDriverWritesSlotsAndProducesPcm);
 #endif

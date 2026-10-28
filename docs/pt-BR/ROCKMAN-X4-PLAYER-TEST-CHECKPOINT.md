@@ -18,9 +18,13 @@ processa um pedido de volume. A implementação posterior acrescentou slots PCM,
 envelopes e o modo `--scsp-driver`; o boot de 25M pela ISO produziu áudio com
 27 key-ons e erro SDK zero. Em 28/10 entraram noise, LFO de pitch/amplitude,
 modulação de fase, o DSP de efeitos com linha de atraso na RAM de som e o
-relógio de áudio por passo do scheduler. A validação auditiva de
+relógio de áudio por passo do scheduler. Na mesma data o DMA e o MIDI do SCSP
+foram implementados, a execução do 68000 passou a ser distribuída por passo
+(~13 ciclos) e as 113 sequências dos cinco bancos foram executadas pelo driver
+real: nenhuma usa noise, LFO, FM ou DSP, e o `SDDRVS.TSK` nunca recebe uma
+imagem de programa de DSP. A validação auditiva de
 tiros/WARNING/explosões e das vozes na fase continua pendente; os testes provam
-a síntese, não a fidelidade de um efeito nomeado.
+a síntese e a mecânica, não a fidelidade de um efeito nomeado.
 
 Atualização de 19/10: a rota curta seleciona X, pede `ST00_0_X.BIN` em FAD
 12965 e chega à primeira cena da fase. O replay corrigido terminou em 108M,

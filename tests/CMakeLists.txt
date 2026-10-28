@@ -12,6 +12,7 @@ add_executable(saturnbox-tests
     scsp_timing_tests.cpp
     scsp_synth_tests.cpp
     scsp_driver_tests.cpp
+    scsp_dma_tests.cpp
     vdp1_debug_tests.cpp
     live_debug_tests.cpp
     ../tools/saturn-sh2/src/live_debug.cpp

@@ -28,6 +28,8 @@ namespace {
 
 struct ScspRuntime::DriverBackend {
     explicit DriverBackend(ScspRuntime& runtime) : owner(runtime) {
+        // SCSP DMA completion is an interrupt factor owned by ScspTiming.
+        synth.setDmaCompletionHook([this] { timing.notifyDmaCompletion(); });
 #ifdef SATURNBOX_HAS_M68K
         cpu = std::make_unique<M68k>(M68k::Bus{
             [this](auto a) { return static_cast<std::uint8_t>(readBus(a, 1U)); },
@@ -80,29 +82,54 @@ struct ScspRuntime::DriverBackend {
         else ++owner.stats_.driverUnmappedWrites;
     }
 
-    std::array<float, 2> renderSample() {
+    // Runs the sound CPU for at most `cycles`, allowing the instruction that
+    // crosses the boundary to complete. The executed count is returned so the
+    // caller can carry the overshoot instead of drifting.
+    std::uint64_t runCpu(std::uint64_t cycles) {
+        std::uint64_t executed{};
 #ifdef SATURNBOX_HAS_M68K
-        if (owner.soundCpuEnabled_) {
-            if (needsReset) {
-                const auto sp = readBytes(owner.ram_, 0U, 4U);
-                const auto pc = readBytes(owner.ram_, 4U, 4U);
-                if (sp > kRamSize || pc >= kRamSize || ((sp | pc) & 1U) != 0U)
-                    throw DriverError("SCSP 68000 reset vectors are invalid");
-                cpu->reset();
-                cycleDebt = 0;
-                needsReset = false;
-                ++owner.stats_.driverResets;
-            }
-            cpu->setIrq(timing.irqLevel());
-            if (cycleDebt < 256) {
-                const auto cycles = cpu->execute(static_cast<std::uint32_t>(256 - cycleDebt));
-                cycleDebt += cycles;
-                owner.stats_.driverCycles += cycles;
-            }
-            cycleDebt -= 256;
-            owner.stats_.driverPc = cpu->pc();
+        if (!owner.soundCpuEnabled_ || cpu == nullptr) return 0;
+        if (needsReset) {
+            const auto sp = readBytes(owner.ram_, 0U, 4U);
+            const auto pc = readBytes(owner.ram_, 4U, 4U);
+            if (sp > kRamSize || pc >= kRamSize || ((sp | pc) & 1U) != 0U)
+                throw DriverError("SCSP 68000 reset vectors are invalid");
+            cpu->reset();
+            cycleDebt = 0;
+            needsReset = false;
+            ++owner.stats_.driverResets;
         }
+        cpu->setIrq(timing.irqLevel());
+        while (executed < cycles) {
+            const auto chunk = static_cast<std::uint32_t>(
+                std::min<std::uint64_t>(cycles - executed, 4096U));
+            const auto ran = cpu->execute(chunk);
+            if (ran == 0U) break;
+            executed += ran;
+        }
+        owner.stats_.driverCycles += executed;
+        owner.stats_.driverPc = cpu->pc();
+#else
+        static_cast<void>(cycles);
 #endif
+        return executed;
+    }
+
+    std::array<float, 2> renderSample(bool advanceCpu) {
+        if (advanceCpu) {
+#ifdef SATURNBOX_HAS_M68K
+            if (owner.soundCpuEnabled_) {
+                // Legacy path: one 44.1 kHz sample is 256 sound-CPU cycles.
+                if (cycleDebt < 256) {
+                    const auto executed = runCpu(256 - cycleDebt);
+                    cycleDebt += static_cast<std::int64_t>(executed);
+                }
+                cycleDebt -= 256;
+            }
+#else
+            static_cast<void>(advanceCpu);
+#endif
+        }
         const auto sample = synth.renderSample(owner.ram_);
         timing.advanceSamples(1U);
         return sample;
@@ -381,11 +408,21 @@ void ScspRuntime::setAudioFrameBlocks(std::size_t blocksPerFrame) noexcept {
     audioFrameOpen_ = false;
     frameBlockCount_ = 0;
     frameSampleCount_ = 0;
+    frameSoundCpuCycles_ = 0;
+}
+
+void ScspRuntime::advanceSoundCpu(std::uint64_t targetCycles) {
+    if (!driver_ || frameSoundCpuCycles_ >= targetCycles) return;
+    frameSoundCpuCycles_ += driver_->runCpu(targetCycles - frameSoundCpuCycles_);
 }
 
 void ScspRuntime::onBlockTick() {
-    if (audioFrameBlocks_ == 0U || realtimeAudioClock_) return;
+    if (!blockClockActive()) return;
     constexpr auto kSamplesPerVideoFrame = kAudioSampleRate / 60U;
+    // Saturn's sound CPU is clocked 256 times per 44.1 kHz sample.
+    constexpr std::uint64_t kSoundCyclesPerSample = 256U;
+    constexpr auto kSoundCyclesPerFrame =
+        static_cast<std::uint64_t>(kSamplesPerVideoFrame) * kSoundCyclesPerSample;
     if (!audioFrameOpen_) {
         beginAudioFrame(kSamplesPerVideoFrame);
         audioFrameOpen_ = true;
@@ -402,21 +439,32 @@ void ScspRuntime::onBlockTick() {
         renderSamples(count);
         stats_.audioSubFrameSamples += count;
     }
+    // The sound CPU runs slightly ahead of the samples rendered in this step,
+    // so its register writes land in the same moment the SH-2 produced them
+    // instead of a whole frame later.
+    advanceSoundCpu((static_cast<std::uint64_t>(frameBlockCount_) * kSoundCyclesPerFrame) /
+                    audioFrameBlocks_);
     ++stats_.audioBlockTicks;
 }
 
 void ScspRuntime::onVBlank() {
     constexpr auto kSamplesPerVideoFrame = kAudioSampleRate / 60U;
-    if (audioFrameBlocks_ != 0U && !realtimeAudioClock_) {
+    constexpr std::uint64_t kSoundCyclesPerSample = 256U;
+    constexpr auto kSoundCyclesPerFrame =
+        static_cast<std::uint64_t>(kSamplesPerVideoFrame) * kSoundCyclesPerSample;
+    if (blockClockActive()) {
         if (!audioFrameOpen_) {
             beginAudioFrame(kSamplesPerVideoFrame);
             renderSamples(kSamplesPerVideoFrame);
         } else if (frameSampleCount_ < kSamplesPerVideoFrame) {
             renderSamples(kSamplesPerVideoFrame - frameSampleCount_);
         }
+        // Finish the exact 256-cycles-per-sample budget for this frame.
+        advanceSoundCpu(kSoundCyclesPerFrame);
         finishAudioFrame();
         audioFrameOpen_ = false;
         frameBlockCount_ = 0;
+        frameSoundCpuCycles_ = 0;
         return;
     }
     if (!realtimeAudioClock_) {
@@ -480,8 +528,11 @@ void ScspRuntime::renderSamples(std::size_t count) {
     const auto offset = frameSampleCount_ * kAudioChannels;
     if (count == 0U || offset + count * kAudioChannels > lastAudioFrame_.samples.size()) return;
     if (driver_) {
+        // With the block clock active the sound CPU is advanced by
+        // onBlockTick; otherwise one sample carries 256 sound-CPU cycles.
+        const auto advanceCpu = !blockClockActive();
         for (std::size_t sample = 0; sample < count; ++sample) {
-            const auto stereo = driver_->renderSample();
+            const auto stereo = driver_->renderSample(advanceCpu);
             lastAudioFrame_.samples[offset + sample * 2U] = stereo[0];
             lastAudioFrame_.samples[offset + sample * 2U + 1U] = stereo[1];
         }
@@ -572,6 +623,11 @@ void ScspRuntime::finishAudioFrame() {
         stats_.dspSteps = driver_->synth.dsp().stats().steps;
         stats_.unsupportedSourceSamples = slots.unsupportedSourceSamples;
         stats_.slotOutOfRangeSamples = slots.outOfRangeSamples;
+        stats_.dmaTransfers = slots.dmaTransfers;
+        stats_.dmaWords = slots.dmaWords;
+        const auto& timing = driver_->timing.stats();
+        stats_.midiBytesOut = timing.midiBytesOut;
+        stats_.midiBytesIn = timing.midiBytesIn;
     } else {
         std::uint32_t active{};
         for (const auto& voice : voices_) active += voice.active ? 1U : 0U;

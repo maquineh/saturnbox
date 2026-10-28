@@ -226,14 +226,57 @@ não depende dele. O que falta para tiro, explosão e voz não é o DSP, e sim
 decodificar e acionar as sequências corretas (comando `01` e eventos comprimidos)
 e validar o som na fase.
 
-### Pendências
+### Pendências fechadas em 28/10
 
-- Identificar o programa de DSP que o driver `SDDRVS.TSK` realmente carrega e se
-  os efeitos/vozes do X4 passam por ele ou só pelos slots diretos.
-- Decodificar os eventos das sequências e confirmar auditivamente tiro, dash,
-  WARNING e explosão na fase.
-- Medir se noise/LFO aparecem nos bancos usados pelo jogo, em vez de só nos
-  testes sintéticos.
-- O interleaving ainda é por passo do scheduler, não por ciclo do 68000; a
-  granularidade é muito menor que um quadro, mas não é ciclo a ciclo.
-- MIDI e DMA do SCSP continuam não implementados.
+As cinco pendências desta lista foram investigadas. Resultado por item:
+
+1. **Programa de DSP e caminho dos efeitos.** A
+   [análise estática](SCSP-DRIVER-STATIC-ANALYSIS.md) decodificou o caminho de
+   carga: `0x13C6`–`0x14D1` copia 1.280 bytes de `[0x8858]+0x40` para
+   `0x00100700`–`0x00100BFF` (COEF, MADRS, espelho e MPRO). Mas `[0x8858]`,
+   `[0x8850]`, `[0x8854]` e `[0x8808]` são zero nos dois dumps e a área
+   `0x7000`–`0x8838` está zerada: o driver nunca recebeu a imagem. Todo o resto
+   que escreve em `0x800`–`0xBFF` é preenchimento com zero, e `0x00100BF0` (start
+   do DSP) não aparece em nenhum lugar dos 512 KiB. O probe confirma em execução:
+   1.024 escritas na janela, todas zero, `dsp_steps=0` nas 113 sequências. Os
+   efeitos e vozes do X4 desta captura passam **só pelos slots PCM diretos**.
+2. **Eventos das sequências.** O contêiner foi decodificado (cabeçalho de 16
+   bytes, fluxo de eventos a partir de `0x10`, despachante em PC `0x57B8`,
+   papéis de opcode/operando vindos do trace de leitura) e as 113 entradas foram
+   executadas pelo driver real, com WAV e catálogo acústico em
+   [SCSP-SEQUENCE-ANALYSIS.md](SCSP-SEQUENCE-ANALYSIS.md). A identificação
+   nominal (tiro, dash, WARNING, explosão) **não** foi fechada: depende da
+   imagem do disco, que não existia na máquina (`H:\Isos` ausente). O catálogo
+   entrega os candidatos (11 efeitos curtos e brilhantes) e o comando exato que
+   o jogo emitiu em combate.
+3. **Noise/LFO nos bancos do jogo.** Medido, não inferido: 113 entradas, duas
+   rodadas de controle (3 e 6), **0** amostras de noise, **0** de LFO de pitch
+   ou amplitude, **0** de modulação e **0** de DSP. O trace de escritas mostra o
+   motivo: o player liga slots com `SSCTL=0`, `LFO=0`, `MOD=0` e `IMXL=0`.
+4. **Interleaving do 68000.** Deixou de ser uma rajada de 256 ciclos por
+   amostra: `onBlockTick` adianta o CPU de som pela fração de ciclos devida em
+   cada passo do scheduler (`188.160` ciclos por quadro distribuídos), então
+   com 14.000 passos/quadro cada passo roda ~13,4 ciclos, e com 7.350 passos
+   ~25,6. O total continua exatamente 256 ciclos por amostra (o VBlank fecha a
+   conta). A granularidade agora é a instrução do 68000 dentro do passo, não o
+   quadro.
+5. **MIDI e DMA do SCSP.** Implementados. O DMA (`0x412`–`0x417`) copia palavras
+   entre a RAM de som e a janela de registradores nos dois sentidos, com modo
+   *gate* (zerar o destino), `DEXE` limpo ao final, contagem de palavras
+   descartadas quando a imagem de RAM é menor que o endereço e fator de
+   interrupção de conclusão (bit 4). O MIDI tem FIFOs de 32 bytes de entrada e
+   saída, palavra de status `0x404` (MOFULL/MOEMPTY/MIOVF/MIFULL/MIEMP/MIBUF),
+   consumo de MIBUF na leitura, transmissão drenada a uma amostra por byte e
+   fator de interrupção bit 3. `ScspTiming::pushMidiInput` permite injetar bytes
+   de um dispositivo externo. O tempo de linha serial (31.250 baud) não é
+   modelado.
+
+### Pendências restantes
+
+- Identificação nominal dos efeitos na fase, com a imagem do disco e o
+  debugger/OBS (ver item 2 acima).
+- O interleaving é por passo do scheduler mais a instrução do 68000; ainda não
+  é ciclo a ciclo do barramento.
+- O DMA usa a última imagem de RAM conhecida; um pedido antes da primeira
+  amostra é adiado para a próxima, não rejeitado.
+- O MIDI não modela 31.250 baud nem handshake externo.

@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 
@@ -39,6 +40,9 @@ public:
         std::uint64_t unsupportedSourceSamples{};
         std::uint64_t outOfRangeSamples{};
         std::uint64_t invalidLoops{};
+        std::uint64_t dmaTransfers{};
+        std::uint64_t dmaWords{};
+        std::uint64_t dmaDropped{};
     };
 
     ScspSynth();
@@ -52,6 +56,13 @@ public:
     [[nodiscard]] std::size_t activeVoiceCount() const noexcept;
     [[nodiscard]] const Stats& stats() const noexcept { return stats_; }
     [[nodiscard]] const ScspDsp& dsp() const noexcept { return dsp_; }
+
+    // SCSP DMA (0x412-0x417) moves 16-bit words between sound RAM and the
+    // register window. The RAM image is refreshed on every rendered sample, so
+    // a transfer requested before the first sample is executed as soon as the
+    // image is known. The hook reports completion for the DMA interrupt factor.
+    void setDmaCompletionHook(std::function<void()> hook);
+    [[nodiscard]] bool dmaPending() const noexcept { return dmaPending_; }
 
 private:
     enum class Envelope : std::uint8_t { Attack, Decay1, Decay2, Release };
@@ -95,6 +106,9 @@ private:
     [[nodiscard]] float pcm(std::size_t index, std::int64_t sample,
                             std::span<std::uint8_t> ram);
     [[nodiscard]] std::int32_t nextNoise() noexcept;
+    void requestDma();
+    void executeDma();
+    [[nodiscard]] std::uint32_t ramWordAt(std::uint32_t address) const noexcept;
     std::array<std::uint8_t, kRegisterBytes> registers_{};
     std::array<Slot, kSlotCount> slots_{};
     std::array<std::int32_t, kRingBufferSize> ringBuffer_{};
@@ -102,6 +116,16 @@ private:
     std::uint16_t monitor_{};
     std::uint16_t noiseState_{0x4A3FU};
     ScspDsp dsp_{};
+    // DMA state, mirroring MAME's DMEA/DRGA/DTLG/DDIR/DGATE.
+    std::uint32_t dmaMemory_{};
+    std::uint32_t dmaRegister_{};
+    std::uint32_t dmaLength_{};
+    bool dmaDirection_{};
+    bool dmaGate_{};
+    bool dmaActive_{};
+    bool dmaPending_{};
+    std::span<std::uint8_t> soundRam_{};
+    std::function<void()> dmaCompletion_{};
     Stats stats_{};
 };
 

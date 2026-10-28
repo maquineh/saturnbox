@@ -27,8 +27,13 @@ The latest player-route evidence is from 2026-10-27:
   and no SDK errors. On 2026-10-28 the internal noise source, the pitch and
   amplitude LFOs, slot phase modulation and the effect DSP (delay memory in
   sound RAM) were implemented, and the audio clock now advances per scheduler
-  step instead of once per VBlank. Gameplay cue fidelity and an audible
-  song/voice comparison remain unvalidated.
+  step instead of once per VBlank. On the same date the SCSP DMA and MIDI were
+  implemented, sound-CPU time was spread across scheduler steps (~13 cycles at
+  the default period) and all 113 sequence entries in the five banks were run
+  through the real driver: none uses noise, LFO, FM or the DSP, and the driver
+  never receives a DSP program image. An audible in-game comparison of
+  shot/dash/WARNING/explosion remains unvalidated because the disc image was
+  not available.
 - A recorded live-control session completed the introductory stage and
   advanced into Frost Kibatodos's stage. It confirmed accumulated player
   poses, localized striped sprite corruption, and user-reported pillar

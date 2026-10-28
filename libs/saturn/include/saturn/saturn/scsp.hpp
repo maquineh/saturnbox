@@ -81,6 +81,8 @@ public:
         std::uint64_t noiseSamples{}, pitchLfoSamples{}, amplitudeLfoSamples{};
         std::uint64_t fmSamples{}, dspSendSamples{}, dspEffectSamples{}, dspSteps{};
         std::uint64_t unsupportedSourceSamples{}, slotOutOfRangeSamples{};
+        // SCSP DMA and MIDI activity.
+        std::uint64_t dmaTransfers{}, dmaWords{}, midiBytesOut{}, midiBytesIn{};
         // Sub-frame audio clock: one tick per scheduler step, and the number of
         // samples rendered ahead of the VBlank that publishes the frame.
         std::uint64_t audioBlockTicks{}, audioSubFrameSamples{};
@@ -133,6 +135,12 @@ private:
     void beginAudioFrame(std::size_t samplesPerChannel);
     void renderSamples(std::size_t count);
     void finishAudioFrame();
+    // Sound-CPU time advances with the audio clock: `targetCycles` is the
+    // absolute per-frame budget reached at the current scheduler step.
+    void advanceSoundCpu(std::uint64_t targetCycles);
+    [[nodiscard]] bool blockClockActive() const noexcept {
+        return audioFrameBlocks_ != 0U && !realtimeAudioClock_;
+    }
     void serviceSoundCommands();
     struct DriverBackend;
     std::unique_ptr<DriverBackend> driver_;
@@ -187,6 +195,10 @@ private:
     std::size_t frameBlockCount_{};
     std::size_t frameSampleCount_{};
     bool audioFrameOpen_{};
+    // Sound-CPU cycles already executed in the current frame. Kept separate
+    // from driverCycles so a frame can finish its exact 256-cycles-per-sample
+    // budget even when the last scheduler step lands short.
+    std::uint64_t frameSoundCpuCycles_{};
 };
 
 } // namespace saturn::platform
