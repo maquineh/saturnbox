@@ -127,6 +127,76 @@ banco 2, sequência 11) corresponde a um som **sustentado** de ~0,4 s, o que é
 compatível com uma trilha curta ou um efeito com cauda, não com um disparo
 seco.
 
+### Taxa de gatilho por entrada (rota longa)
+
+Uma segunda execução rodou 600 milhões de blocos (714 s de áudio, 4.020
+key-ons, 3.541 pedidos, 34 tipos de sequência) com direita mantida, disparo a
+cada 3M de blocos, salto a cada 7M e dash a cada 17M. Para cada tipo de
+sequência, a tabela mostra a fração dos eventos de entrada seguidos por um
+pedido daquele tipo em até 50 mil blocos (~60 ms):
+
+| sequência | pedidos | após B | após A | após C | só direita |
+| --- | --- | --- | --- | --- | --- |
+| `c2 b1 s0` | 112 | **0,68** | 0,15 | 0,07 | 0,00 |
+| `c3 b2 s6` | 50 | **0,31** | 0,04 | 0,04 | 0,00 |
+| `c3 b2 s2` | 31 | **0,19** | 0,01 | 0,00 | 0,00 |
+| `c3 b2 s3` | 26 | **0,16** | 0,08 | 0,04 | 0,00 |
+| `c0 b0 s19` | 136 | 0,07 | **0,60** | 0,11 | 0,07 |
+| `c1 b1 s7` | 39 | 0,06 | **0,51** | 0,07 | 0,00 |
+| `c7 b1 s11` | 48 | 0,03 | **0,24** | 0,04 | 0,00 |
+| `c2 b1 s4` | 9 | 0,01 | 0,00 | **0,14** | 0,00 |
+| `c5 b3 s5` | 52 | 0,00 | 0,00 | 0,00 | 0,01 |
+| `c5 b3 s7` | 26 | 0,01 | 0,01 | 0,04 | 0,00 |
+| `c5 b3 s12` | 24 | 0,00 | 0,00 | 0,00 | 0,00 |
+| `c5 b3 s13` | 24 | 0,01 | 0,00 | 0,00 | 0,00 |
+
+Leitura: o disparo não é um som só — ele pede `c2 b1 s0` em 68% dos casos e
+`c3 b2 s6/s2/s3` com menor frequência (provavelmente camadas: cano, tiro e
+acerto). O salto pede `c0 b0 s19` e `c1 b1 s7`; o dash pede `c2 b1 s4`. Já
+`c5 b3 s5/s7/s12/s13` (a família one-shot de 42 bytes) **não** correlaciona com
+nenhuma entrada: são eventos do jogo (acerto/explosão/dano). Essa é a evidência
+mais próxima de uma explosão que os dados dão, mas ainda falta vê-la acontecer.
+
+### A rota longa não chega ao chefe
+
+Os 34 tipos de sequência aparecem todos até ~180 s e continuam até o fim: não
+surge nenhum tipo novo na segunda metade, o que seria esperado se a música ou o
+aviso do chefe entrassem. Os tipos pedidos aos 21 s reaparecem aos ~701 s,
+padrão compatível com reinício de fase depois de o jogador morrer. Com entrada
+cega (sem desviar de inimigos e abismos) não foi possível atravessar a fase:
+**WARNING não foi exercitado**.
+
+Para fechar isso, o caminho certo é uma sessão jogada por uma pessoa com o
+debugger. `launch_x4_stage.ps1 -ScspDriver` agora grava
+`--audio-output` e `--scsp-requests` automaticamente, então basta jogar até o
+chefe e me passar o diretório da sessão: o mesmo cruzamento gatilho→pedido
+identifica o WARNING e as explosões.
+
+## A família de 42 bytes é um one-shot parametrizado
+
+Sessenta e nove das 113 entradas têm exatamente 42 bytes (banco 3: 25, banco 4:
+24, banco 2: 20). Elas são o mesmo template:
+
+- todas começam com `00 30 00 01 00 10 00 08`, que são os campos de cabeçalho;
+- dentro de um mesmo banco, o **único** byte que muda é o `0x24`, que assume
+  exatamente o índice da entrada (0..24 no banco 3, 0..23 no banco 4, 0..20 no
+  banco 2);
+- entre bancos, além do `0x24`, mudam `0x0D`–`0x0F` (parte do u32 de `0x0C`) e
+  o `0x12` (1 a 4), que ficam constantes dentro de um banco;
+- o trace de leitura mostra o `0x24` sendo lido por um handler em PC `0x57C4`,
+  diferente do despachante em `0x57B8` — é um parâmetro, não um opcode.
+
+O áudio confirma a leitura: as 25 entradas do banco 3 renderizam ~0,50 s cada,
+com o mesmo formato de envelope e picos entre 0,36 e 0,73, mudando a altura e o
+centroide (de 471 Hz a 3238 Hz). Ou seja, o template toca **uma amostra por
+entrada** com envelope fixo: são one-shots parametrizados, e o `0x24` escolhe
+qual amostra do banco PCM tocar.
+
+Na fase, os pedidos `c5 b3 s5`, `s7`, `s12` e `s13` aparecem entre 0,5 s e 1,3 s
+depois de um disparo, o que é compatível com sons de impacto/acerto
+disparados quando o tiro encontra algo. A identificação nominal de cada um
+desses 25 one-shots ainda depende de vê-los na fase com inimigos.
+
 ## Validação na fase (28/10/2026)
 
 A imagem do disco foi disponibilizada em
@@ -217,18 +287,21 @@ usar um estado salvo na porta do chefe.
 
 ## Limites restantes
 
-O que ainda falta, depois da validação na fase:
+O que ainda falta, depois das duas rodadas na fase:
 
-- WARNING e explosão não foram exercitados pela rota (ela cobre a primeira
-  parte da fase, sem chefe e sem garantir inimigos destruídos). O método que
-  funcionou para o tiro deve ser repetido nesses dois momentos.
-- A identificação de "tiro", "dash" e "salto" vem do gatilho (botão → pedido),
-  não de uma comparação acústica. É uma inferência forte e reprodutível, mas
-  ainda não é a confirmação auditiva humana; as janelas WAV por pressionamento
-  permitem essa escuta.
-- O casamento por forma de onda fica inviável enquanto a captura saturar em
-  1,0; uma captura com MVOL menor (ou sem a música) permitiria a comparação
-  exata.
+- **WARNING e explosão**. As duas rotas cegas (205M e 600M de blocos) cobrem a
+  primeira fase e reiniciam sem chegar ao chefe. Os candidatos a
+  acerto/explosão existem (`c5 b3 s5/s7/s12/s13`, sem correlação com entrada),
+  mas nomeá-los exige ver o evento acontecer. O caminho é uma sessão jogada por
+  uma pessoa com `launch_x4_stage.ps1 -ScspDriver`, que já grava áudio e
+  pedidos.
+- A identificação de tiro, salto e dash vem do gatilho (entrada → pedido), que
+  é forte e reprodutível, mas não é escuta humana: as janelas WAV por
+  pressionamento permitem essa confirmação.
+- O casamento por forma de onda entre a captura e o WAV offline não fecha, e a
+  hipótese principal é que a captura de RAM usada no offline tenha uma versão
+  diferente dos bancos PCM em relação ao estado do jogo aos ~190 s. Uma captura
+  de RAM no mesmo instante resolveria a dúvida.
 
 ## Reprodução
 

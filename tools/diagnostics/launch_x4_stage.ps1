@@ -4,6 +4,8 @@ param(
     [long]$VBlankBlocks = 10000,
     [string]$ExecutablePath,
     [string]$DebugSession,
+    [string]$AudioOutput,
+    [string]$ScspRequests,
     [switch]$ScspDriver
 )
 
@@ -19,7 +21,22 @@ $executable = if ([string]::IsNullOrWhiteSpace($ExecutablePath)) {
     }
     (Resolve-Path -LiteralPath $candidate).Path
 }
-$disc = (Resolve-Path -LiteralPath $DiscImage).Path
+# The launcher default points at the archive layout used on the original
+# machine; fall back to the usual Downloads copy so a fresh machine works.
+$discCandidates = @(
+    $DiscImage,
+    (Join-Path $env:USERPROFILE 'Downloads/rockmanx4/Rockman X4 (J)(Saturn)(ISO).mdf')
+)
+$disc = $null
+foreach ($candidate in $discCandidates) {
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+        $disc = (Resolve-Path -LiteralPath $candidate).Path
+        break
+    }
+}
+if ($null -eq $disc) {
+    throw "Disc image not found. Tried: $($discCandidates -join '; ')"
+}
 $aip = Join-Path $taskRoot 'build/rockman/aip.bin'
 $ip = Join-Path $taskRoot 'build/rockman/ip.bin'
 $program = Join-Path $taskRoot 'build/rockman/0.BIN'
@@ -66,7 +83,27 @@ $runnerArguments = @(
 if (-not [string]::IsNullOrWhiteSpace($DebugSession)) {
     $runnerArguments += @('--debug-session', [System.IO.Path]::GetFullPath($DebugSession))
 }
-if ($ScspDriver) { $runnerArguments += '--scsp-driver' }
+if ($ScspDriver) {
+    $runnerArguments += '--scsp-driver'
+    # With the real driver it is worth keeping the audio and the sequence
+    # requests: F8 captures then document which cue each moment triggered.
+    $captureRoot = if (-not [string]::IsNullOrWhiteSpace($DebugSession)) {
+        [System.IO.Path]::GetFullPath($DebugSession)
+    } else {
+        Join-Path $taskRoot 'build/tmp'
+    }
+    New-Item -ItemType Directory -Force -Path $captureRoot | Out-Null
+    if ([string]::IsNullOrWhiteSpace($AudioOutput)) {
+        $AudioOutput = Join-Path $captureRoot 'x4-audio.wav'
+    }
+    if ([string]::IsNullOrWhiteSpace($ScspRequests)) {
+        $ScspRequests = Join-Path $captureRoot 'x4-requests.csv'
+    }
+    $runnerArguments += @('--audio-output', [System.IO.Path]::GetFullPath($AudioOutput))
+    $runnerArguments += @('--scsp-requests', [System.IO.Path]::GetFullPath($ScspRequests))
+    Write-Output "Audio: $AudioOutput"
+    Write-Output "Sequence requests: $ScspRequests"
+}
 
 Write-Output 'Opening X4. The known menu route and READY transition run first; live controls take over at 160M blocks.'
 Write-Output 'Once the stage appears, use arrows / Z-X-C / Enter or an XInput controller.'
