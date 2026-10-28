@@ -172,6 +172,35 @@ debugger. `launch_x4_stage.ps1 -ScspDriver` agora grava
 chefe e me passar o diretório da sessão: o mesmo cruzamento gatilho→pedido
 identifica o WARNING e as explosões.
 
+### Ferramentas de depuração para chegar ao chefe
+
+Para tentar atravessar a fase sem um jogador humano, o `saturn-sh2` ganhou duas
+opções de depuração e há um script de apoio:
+
+- `--poke STEP:ADDR:VALUE[:WIDTH]` (repetível, passos crescentes) escreve na
+  memória do convidado uma vez por passo. Serve para manter o jogador vivo ou
+  reposicioná-lo em rotas automáticas; não é usado em execução normal.
+- `--watch-memory ADDR:LENGTH:PERIOD` com `--watch-dir DIR` grava uma cópia
+  binária da região a cada PERIOD passos (amostragem a partir de
+  `--watch-from`).
+- `tools/diagnostics/find_x4_health.py` compara essas cópias e ranqueia offsets
+  com cara de contador pequeno que cai e volta.
+
+Resultados dessas tentativas, todos negativos e registrados para não serem
+repetidos:
+
+| tentativa | resultado |
+| --- | --- |
+| rota cega 205M (tiro + direita) | reinicia a fase, sem chefe |
+| rota cega 600M (tiro + salto + dash) | mesmo conjunto de 34 cues até o fim, sem cue novo |
+| 122 amostras de WRAM (0x06050000, 64 KiB, 1M de passos) | 2.815 candidatos, nenhum com forma de vida (a maioria é tabela de objetos/RNG) |
+| warp de posição (`--poke` em 0x060545A8, +1 unidade a cada 2M de passos) | mesmo conjunto de 33 cues; a posição é reescrita pela física do jogo |
+| renders longos (20M de ciclos) de bancos 0 e 1 | nenhum motivo de sirene inequívoco; durações de 0,58 a 1,75 s |
+
+Conclusão operacional: **chegar ao chefe exige jogo humano** (ou um savestate na
+porta do chefe). O launcher já grava áudio e todos os comandos, então a sessão
+jogada é o único insumo que falta.
+
 ## A família de 42 bytes é um one-shot parametrizado
 
 Sessenta e nove das 113 entradas têm exatamente 42 bytes (banco 3: 25, banco 4:

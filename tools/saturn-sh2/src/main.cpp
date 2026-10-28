@@ -88,6 +88,15 @@ struct Arguments {
     std::optional<std::filesystem::path> x4PlayerSamplesOutput;
     std::optional<std::filesystem::path> debugSessionDirectory;
     std::optional<std::string> padSequence;
+    // Debug-only scripted memory writes, applied once per scheduler step:
+    // step, address, value, width. Used to keep the player alive in long
+    // automated routes; never used by the emulator itself.
+    std::vector<std::tuple<std::size_t, saturn::core::Address, std::uint32_t, std::uint8_t>> pokes;
+    std::optional<saturn::core::Address> watchAddress;
+    std::optional<std::filesystem::path> watchDirectory;
+    std::size_t watchLength{};
+    std::size_t watchPeriod{};
+    std::size_t watchFrom{};
     std::optional<std::size_t> padLiveAfterBlocks;
     std::optional<std::size_t> controlTraceFromStep;
     bool controlTraceOreg2Only{};
@@ -2700,6 +2709,10 @@ std::optional<Arguments> parseArguments(int argc, char** argv) {
               option == "--x4-player-samples" ||
               option == "--control-trace-from-step" ||
              option == "--pad-sequence" ||
+             option == "--poke" ||
+             option == "--watch-memory" ||
+             option == "--watch-dir" ||
+             option == "--watch-from" ||
              option == "--pad-live-after-blocks" ||
              option == "--steps" || option == "--vblank-blocks" ||
              option == "--pad1" || option == "--pad2" || option == "--pad-after-blocks" ||
@@ -2776,6 +2789,73 @@ std::optional<Arguments> parseArguments(int argc, char** argv) {
             arguments.controlTraceOreg2Only = true;
         } else if (option == "--pad-sequence") {
             arguments.padSequence = argv[++index];
+        } else if (option == "--poke") {
+            // STEP:ADDR:VALUE[:WIDTH], all numbers in decimal or 0x form.
+            const std::string_view text = argv[++index];
+            const auto split = [](std::string_view value, char separator) {
+                std::vector<std::string> parts;
+                std::size_t start = 0;
+                while (true) {
+                    const auto position = value.find(separator, start);
+                    parts.emplace_back(value.substr(start, position == std::string_view::npos
+                                                               ? std::string_view::npos
+                                                               : position - start));
+                    if (position == std::string_view::npos) break;
+                    start = position + 1;
+                }
+                return parts;
+            };
+            const auto parts = split(text, ':');
+            if (parts.size() < 3 || parts.size() > 4) return std::nullopt;
+            const auto number = [](const std::string& value) -> std::optional<std::uint64_t> {
+                try {
+                    return std::stoull(value, nullptr, 0);
+                } catch (...) {
+                    return std::nullopt;
+                }
+            };
+            const auto step = number(parts[0]);
+            const auto address = number(parts[1]);
+            const auto value = number(parts[2]);
+            const auto width = parts.size() == 4 ? number(parts[3]) : std::optional<std::uint64_t>{1};
+            if (!step || !address || !value || !width) return std::nullopt;
+            if (*address > 0xFFFFFFFFULL || *value > 0xFFFFFFFFULL ||
+                (*width != 1 && *width != 2 && *width != 4)) {
+                return std::nullopt;
+            }
+            arguments.pokes.emplace_back(static_cast<std::size_t>(*step),
+                                         static_cast<saturn::core::Address>(*address),
+                                         static_cast<std::uint32_t>(*value),
+                                         static_cast<std::uint8_t>(*width));
+        } else if (option == "--watch-memory") {
+            // ADDR:LENGTH:PERIOD, sampled once when the step counter crosses
+            // each multiple of PERIOD starting at --watch-from.
+            const std::string text = argv[++index];
+            const auto first = text.find(':');
+            const auto second = text.find(':', first + 1);
+            if (first == std::string::npos || second == std::string::npos) return std::nullopt;
+            try {
+                arguments.watchAddress = static_cast<saturn::core::Address>(
+                    std::stoull(text.substr(0, first), nullptr, 0));
+                arguments.watchLength = static_cast<std::size_t>(
+                    std::stoull(text.substr(first + 1, second - first - 1), nullptr, 0));
+                arguments.watchPeriod = static_cast<std::size_t>(
+                    std::stoull(text.substr(second + 1), nullptr, 0));
+            } catch (...) {
+                return std::nullopt;
+            }
+            if (arguments.watchLength == 0 || arguments.watchLength > 0x100000 ||
+                arguments.watchPeriod == 0) {
+                return std::nullopt;
+            }
+        } else if (option == "--watch-dir") {
+            arguments.watchDirectory = std::filesystem::path(argv[++index]);
+        } else if (option == "--watch-from") {
+            try {
+                arguments.watchFrom = static_cast<std::size_t>(std::stoull(argv[++index], nullptr, 0));
+            } catch (...) {
+                return std::nullopt;
+            }
         } else if (option == "--pad-live-after-blocks") {
             std::size_t value{};
             const std::string_view text = argv[++index];
@@ -6185,9 +6265,20 @@ int boot(const Arguments& arguments) {
         }
         return resolver.resolve(address, step);
     };
+    auto pokeIndex = std::size_t{};
+    auto watchNextStep = std::size_t{};
+    std::optional<std::filesystem::path> watchDirectory;
+    if (arguments.watchAddress) {
+        watchDirectory = arguments.watchDirectory
+            ? *arguments.watchDirectory
+            : std::filesystem::path("build/tmp/watch");
+        std::filesystem::create_directories(*watchDirectory);
+        watchNextStep = arguments.watchFrom;
+    }
     options.beforeBlock = [&bootServices, &acceleratedByteFills, &acceleratedWordFills,
                            &acceleratedWordCopies, &realtime, &memoryProbe, expectedEntry,
-                           &mmio, &padSequenceEvents, &x4PlayerSamplesFile,
+                           &mmio, &arguments, &watchDirectory, &padSequenceEvents, &x4PlayerSamplesFile,
+                           &pokeIndex, &watchNextStep,
                            &x4PlayerSampleCount, &x4PlayerSampleWriteFailure,
                            captureX4PlayerSamples = arguments.x4PlayerSamplesOutput.has_value(),
                            padSequenceNextEvent = std::size_t{},
@@ -6205,6 +6296,33 @@ int boot(const Arguments& arguments) {
                            continueAfterExecuteDmp = arguments.continueAfterExecuteDmp](
                               const saturn::sir::BasicBlock& block,
                               saturn::sir::MachineState& state, std::size_t step) mutable {
+        // Scripted debug writes, used by the long automated routes to keep the
+        // player alive. They run once per step and never change normal runs.
+        while (pokeIndex < arguments.pokes.size() &&
+               step >= std::get<0>(arguments.pokes[pokeIndex])) {
+            const auto& [at, address, value, width] = arguments.pokes[pokeIndex];
+            static_cast<void>(at);
+            if (width == 1) {
+                state.write8(address, static_cast<std::uint8_t>(value));
+            } else if (width == 2) {
+                state.write16BE(address, static_cast<std::uint16_t>(value));
+            } else {
+                state.write32BE(address, value);
+            }
+            ++pokeIndex;
+        }
+        if (watchDirectory && arguments.watchAddress && step >= watchNextStep) {
+            const auto path = *watchDirectory /
+                ("watch-" + std::to_string(step) + ".bin");
+            std::ofstream output(path, std::ios::binary | std::ios::trunc);
+            if (output) {
+                for (std::size_t offset = 0; offset < arguments.watchLength; ++offset) {
+                    output.put(static_cast<char>(state.readRaw8(
+                        static_cast<saturn::core::Address>(*arguments.watchAddress + offset))));
+                }
+            }
+            watchNextStep = step + arguments.watchPeriod;
+        }
         if (step >= padAfterBlocks) {
             for (std::size_t port = 0; port < delayedPads.size(); ++port) {
                 if (!delayedPads[port]) continue;
