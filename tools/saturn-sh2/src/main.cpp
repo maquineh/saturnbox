@@ -82,6 +82,8 @@ struct Arguments {
     std::optional<std::filesystem::path> vdp2MapReadTrace;
     std::optional<std::filesystem::path> audioOutput;
     std::optional<std::filesystem::path> scspRequestsOutput;
+    // Report whether the Vulkan VDP1 backend can run here and exit.
+    bool rendererCheck{};
     std::optional<std::filesystem::path> aotEntryOutput;
     std::optional<std::filesystem::path> aotModuleOutput;
     std::optional<std::filesystem::path> controlTraceOutput;
@@ -2647,7 +2649,8 @@ void usage(std::ostream& stream) {
            << "      [--debug-session <directory>] (F8 or capture.request saves a live diagnostic clip)\n"
            << "      [--control-trace-from-step <count>] (requires --control-trace)\n"
            << "      [--control-trace-oreg2-only] (retain only OREG2 SMPC reads plus pad/CD events)\n"
-           << "      [--window] [--audio-live] [--renderer auto|cpu|vulkan]\n"
+           << "      [--window] [--audio-live] [--renderer auto|cpu|vulkan] "
+         "[--renderer-check]\n"
            << "      [--pad1 <buttons>] [--pad2 <buttons>] [--pad-after-blocks <count>]\n"
            << "      [--pad-sequence <step:buttons;...>] (use release to clear)\n"
            << "      [--pad-live-after-blocks <count>] (give port 1 to keyboard/XInput)\n"
@@ -2957,6 +2960,8 @@ std::optional<Arguments> parseArguments(int argc, char** argv) {
             arguments.scspDriver = true;
         } else if (option == "--continue-after-execdmp") {
             arguments.continueAfterExecuteDmp = true;
+        } else if (option == "--renderer-check") {
+            arguments.rendererCheck = true;
         } else {
             return std::nullopt;
         }
@@ -5935,7 +5940,9 @@ int boot(const Arguments& arguments) {
         std::string error;
         vdp1Renderer = saturn::platform::createVulkanVdp1(error);
         if (!vdp1Renderer && arguments.renderer == "vulkan") {
-            std::cerr << "error: Vulkan VDP1: " << error << '\n';
+            std::cerr << "error: Vulkan VDP1: " << error << '\n'
+                      << "hint: run --renderer-check to see the loader and ICD state, or "
+                         "use --renderer cpu\n";
             return 1;
         }
         if (!vdp1Renderer) std::cout << "  Vulkan unavailable, using CPU VDP1: " << error << '\n';
@@ -8493,7 +8500,53 @@ int boot(const Arguments& arguments) {
 
 } // namespace
 
+// Reports whether the Vulkan VDP1 backend can run here. Useful on machines
+// where the GPU driver is old or a software ICD is being tried: it separates
+// "no loader" from "loader but no acceptable device".
+[[nodiscard]] int runRendererCheck() {
+    std::cout << "VDP1 Vulkan check\n";
+    const auto module = ::LoadLibraryW(L"vulkan-1.dll");
+    if (module == nullptr) {
+        std::cout << "  loader: missing (vulkan-1.dll is not in the executable "
+                     "directory, the system directory or PATH)\n";
+    } else {
+        std::cout << "  loader: found\n";
+        ::FreeLibrary(module);
+    }
+    const auto environment = [](const char* name) -> std::string {
+#ifdef _MSC_VER
+        char* buffer = nullptr;
+        std::size_t length = 0;
+        if (::_dupenv_s(&buffer, &length, name) != 0 || buffer == nullptr) return {};
+        std::string value(buffer);
+        std::free(buffer);
+        return value;
+#else
+        const auto* value = std::getenv(name);
+        return value != nullptr ? std::string(value) : std::string{};
+#endif
+    };
+    auto override = environment("VK_DRIVER_FILES");
+    if (override.empty()) override = environment("VK_ICD_FILENAMES");
+    std::cout << "  ICD override: " << (override.empty() ? "(none)" : override) << '\n';
+    std::string error;
+    const auto renderer = saturn::platform::createVulkanVdp1(error);
+    if (renderer) {
+        std::cout << "  device: " << renderer->deviceName() << '\n';
+        std::cout << "  verdict: Vulkan compute available\n";
+        return 0;
+    }
+    std::cout << "  verdict: Vulkan compute unavailable: " << error << '\n';
+    return 1;
+}
+
 int main(int argc, char** argv) {
+    // Handled before argument parsing: the check needs no command or disc.
+    for (int index = 1; index < argc; ++index) {
+        if (std::string_view(argv[index]) == "--renderer-check") {
+            return runRendererCheck();
+        }
+    }
     const auto arguments = parseArguments(argc, argv);
     if (!arguments ||
         (arguments->command != "decode" && arguments->command != "cfg" &&

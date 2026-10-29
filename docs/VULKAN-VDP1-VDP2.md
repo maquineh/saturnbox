@@ -55,14 +55,50 @@ References:
 - [Mednafen VDP2 rendering and rotation sampling](https://github.com/libretro-mirrors/mednafen-git/blob/master/src/ss/vdp2_render.cpp)
 - [Mednafen VDP2 rotation parameter definitions](https://github.com/libretro-mirrors/mednafen-git/blob/master/src/ss/vdp2.cpp)
 
-## Current development host compatibility (2026-10-27)
+## Current development host compatibility (2026-10-29)
 
 The current host has an Intel Core i5-4590 (Haswell, 4th generation) and Intel
-HD Graphics 4600, driver 20.19.15.4531. The Windows Vulkan loader is absent.
-Intel's Vulkan setup guide lists 6th-generation Intel processors as the minimum
-for its Intel Graphics Vulkan path
-([Intel Vulkan guide](https://www.intel.com/content/dam/develop/external/us/en/documents/vulkan-on-unity-instructions-final.pdf)).
-This host therefore has no supported Vulkan device; installing only the loader
-would not add driver support. `--renderer auto` uses the CPU reference path
-here. Keep Vulkan optional and measure visual and audio behavior on the CPU path
-for this machine.
+HD Graphics 4600, driver 20.19.15.4531 (September 2016, the last Haswell
+driver). No `vulkan-1.dll` is installed, there is no
+`HKLM\SOFTWARE\Khronos\Vulkan\Drivers` key, and the only Intel compute DLL
+present is `igdrcl64.dll` (OpenCL). Intel's Vulkan setup guide lists
+6th-generation Intel processors as the minimum for its Intel Graphics Vulkan
+path
+([Intel Vulkan guide](https://www.intel.com/content/dam/develop/external/us/en/documents/vulkan-on-unity-instructions-final.pdf)),
+and Intel's Vulkan 1.2 announcement covers Skylake and Kaby Lake
+([Khronos](https://www.khronos.org/news/archives/intel-releases-vulkan-1.2-drivers)).
+This host has no supported Vulkan device; installing only the loader does not
+add driver support.
+
+That was verified end to end on 2026-10-29 with a portable runtime taken from
+the Edge installation (`vulkan-1.dll`, `vk_swiftshader.dll`,
+`vk_swiftshader_icd.json`, copied next to `saturn-sh2.exe` so no system install
+is needed). `--renderer-check` reports the three states:
+
+| estado | saída |
+| --- | --- |
+| sem loader | `loader: missing (vulkan-1.dll is not in the executable directory, the system directory or PATH)` |
+| loader, sem ICD | `verdict: Vulkan compute unavailable: vkCreateInstance failed (VkResult -9)` |
+| loader + SwiftShader | `verdict: Vulkan compute unavailable: Vulkan compute with shaderFloat64 unavailable` |
+
+`VkResult -9` is `VK_ERROR_INCOMPATIBLE_DRIVER`, i.e. the loader found no
+driver. SwiftShader is a Vulkan 1.0 software ICD and does not expose
+`shaderFloat64`, which the VDP1 shader needs for the inverse bilinear mapping
+of transformed quads, so the backend correctly refuses it instead of rendering
+differently. `--renderer auto` (the default) prints the reason once and uses
+the CPU reference path; `--renderer vulkan` fails with the same reason plus a
+hint.
+
+Options for exercising the Vulkan path, in increasing order of effort:
+
+1. Run it on a machine with a supported GPU. The performance numbers in
+   [`pt-BR/PERFORMANCE.md`](pt-BR/PERFORMANCE.md) come from an RTX 3080 host.
+2. Stage a float64-capable software ICD (Mesa lavapipe) next to the executable
+   and point `VK_ICD_FILENAMES` at it. It exercises the backend for
+   correctness, not for speed.
+3. Remove the `shaderFloat64` requirement with a float32 shader variant and
+   parity tests against the CPU reference. That changes pixel behaviour on
+   edge cases and needs its own validation.
+
+Keep Vulkan optional and measure visual and audio behavior on the CPU path for
+this machine.
