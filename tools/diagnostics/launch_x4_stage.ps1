@@ -7,7 +7,8 @@ param(
     [string]$DebugSession,
     [string]$AudioOutput,
     [string]$ScspRequests,
-    [switch]$ScspDriver
+    [switch]$ScspDriver,
+    [switch]$CaptureOnBrightBars
 )
 
 $ErrorActionPreference = 'Stop'
@@ -83,6 +84,9 @@ $runnerArguments = @(
 )
 if (-not [string]::IsNullOrWhiteSpace($DebugSession)) {
     $runnerArguments += @('--debug-session', [System.IO.Path]::GetFullPath($DebugSession))
+}
+if ($CaptureOnBrightBars) {
+    $runnerArguments += '--capture-on-bright-bars'
 }
 if ($ScspDriver) {
     $runnerArguments += '--scsp-driver'

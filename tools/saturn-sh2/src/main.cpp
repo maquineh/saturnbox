@@ -122,8 +122,14 @@ struct Arguments {
     std::optional<std::size_t> padThirdPressAfterBlocks;
     std::optional<std::size_t> padThirdReleaseAfterBlocks;
     std::optional<std::size_t> frameCaptureAfterBlocks;
+    // Do not write frame images before this scheduler block (frame sweeps of
+    // one stage section would otherwise dump the whole boot and menu).
+    std::optional<std::size_t> frameDirectoryFromBlocks;
     // X:Y pixel reported by the VDP2/VDP1 arbitration probe once per frame.
     std::optional<std::pair<unsigned, unsigned>> vdp2Probe;
+    // Request a live-debug capture automatically when a frame shows the
+    // bright vertical bar artifact reported around the player sprite.
+    bool captureOnBrightBars{};
     std::size_t maxSteps{1'000'000};
     std::size_t vblankPeriodBlocks{};
     bool stepsSpecified{};
@@ -2995,6 +3001,16 @@ std::optional<Arguments> parseArguments(int argc, char** argv) {
             } else {
                 arguments.frameCaptureAfterBlocks = value;
             }
+        } else if (option == "--frame-dir-from-blocks") {
+            if (index + 1 >= argc) return std::nullopt;
+            try {
+                arguments.frameDirectoryFromBlocks = static_cast<std::size_t>(
+                    std::stoull(argv[++index], nullptr, 0));
+            } catch (...) {
+                return std::nullopt;
+            }
+        } else if (option == "--capture-on-bright-bars") {
+            arguments.captureOnBrightBars = true;
         } else if (option == "--trace") {
             arguments.trace = true;
         } else if (option == "--profile") {
@@ -6101,7 +6117,9 @@ int boot(const Arguments& arguments) {
                       << directory.string() << ": " << error.message() << '\n';
             return 1;
         }
-        mmio.video().setFrameSink([directory, realtimeWindow, arguments,
+        auto lastBrightBarCheck = std::chrono::steady_clock::now();
+    mmio.video().setFrameSink([directory, realtimeWindow, arguments,
+                                   &lastBrightBarCheck,
                                    &liveDebug, &debugMetadata, &debugAttachNextFrame,
                                    &nextDebugPoll, &state, &mmio,
                                    &debugReportedError,
@@ -6154,11 +6172,47 @@ int boot(const Arguments& arguments) {
                 }
                 liveDebug->recordFrame(std::move(snapshot), std::move(metadata));
             }
+            if (arguments.captureOnBrightBars && liveDebug) {
+                const auto now = std::chrono::steady_clock::now();
+                if (now - lastBrightBarCheck >= std::chrono::milliseconds(700)) {
+                    lastBrightBarCheck = now;
+                    // The artifact is a grid of short, near-white vertical runs
+                    // over the player sprite: count runs of 3..12 white pixels
+                    // per column and treat a dense cluster as the signature.
+                    unsigned shortRuns{};
+                    for (unsigned x = 0; x < saturn::platform::VideoRuntime::kFrameWidth; ++x) {
+                        unsigned run{};
+                        for (unsigned y = 0; y + 1 < frame.height; ++y) {
+                            const auto pixel = frame.pixels[static_cast<std::size_t>(y) *
+                                saturn::platform::VideoRuntime::kFrameWidth + x];
+                            const auto white = ((pixel >> 16U) & 0xFFU) > 232U &&
+                                ((pixel >> 8U) & 0xFFU) > 232U && (pixel & 0xFFU) > 232U;
+                            if (white) {
+                                ++run;
+                            } else {
+                                if (run >= 3U && run <= 12U) ++shortRuns;
+                                run = 0U;
+                            }
+                        }
+                        if (run >= 3U && run <= 12U) ++shortRuns;
+                    }
+                    if (shortRuns >= 45U) {
+                        std::cout << "bright-bar candidate frame=" << frame.sequence
+                                  << " runs=" << shortRuns << std::endl;
+                        static_cast<void>(liveDebug->request("bright vertical bar artifact"));
+                    }
+                }
+            }
             if (arguments.vdp2Probe) {
                 std::cout << "vdp2-probe frame=" << mmio.video().frameCount() << " "
                           << mmio.video().describeVdp2Pixel(arguments.vdp2Probe->first,
                                                            arguments.vdp2Probe->second)
                           << '\n';
+            }
+            if (arguments.frameDirectory && arguments.frameDirectoryFromBlocks &&
+                mmio.video().frameCount() * (arguments.vblankPeriodBlocks != 0U
+                    ? arguments.vblankPeriodBlocks : 1U) < *arguments.frameDirectoryFromBlocks) {
+                return;
             }
             if (arguments.frameDirectory) {
                 ++presentedFrames;
