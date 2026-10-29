@@ -227,16 +227,45 @@ partir de ~356 s, contra pico ~0,7 antes. Três coisas ficam evidentes:
 
 1. a rota passou a alcançar uma seção nova por volta de 350–356 s, coerente com
    a chegada do chefe;
-2. os candidatos a WARNING estão entre `c5b3s7`, `c5b3s5` (352–353 s) e
-   `c6b3s14` (356,7 s), todos do banco 3 — a família one-shot que também é a
-   candidata a vozes;
+2. os cues que só aparecem nessa seção delimitam o WARNING (ver abaixo);
 3. a seção nova satura a saída em 1,0, o que é um problema de ganho separado.
+
+### O que é exclusivo da seção do chefe
+
+Comparando este log com os das rotas anteriores (205M, 600M e warp), seis tipos
+aparecem **só** na seção nova:
+
+| cue | pedidos | primeira vez | leitura |
+| --- | --- | --- | --- |
+| `c4 b0 s2` | 70 | 355,2 s | base/música da seção (repete) |
+| `c5 b0 s3` | 79 | 362,3 s | base/música da seção (repete) |
+| `c6 b3 s14` | 2 | 356,7 s | one-shot do banco 3, exclusivo da transição |
+| `c1 b0 s15` | 2 | 365,2 s | sequência longa do banco 0 |
+| `c1 b0 s16` | 2 | 365,7 s | sequência longa do banco 0 |
+| `c7 b1 s12` | 1 | 404,0 s | fecha a seção |
+
+Já os one-shots `c5 b3 s5`/`c5 b3 s7`, tocados nas 352–353 s, **não** são
+exclusivos: na rota de 600M eles foram pedidos 52 e 26 vezes durante o combate.
+São sons de acerto/dano, não um aviso único. Por exclusividade, o WARNING é
+`c6 b3 s14` (voz/one-shot, duas vezes em 3,4 s logo depois de a base parar) ou
+`c1 b0 s15`/`c1 b0 s16` (sequências longas, duas vezes cada).
+
+### Casamento por forma de onda: negativo e explicado
+
+Tentei casar o áudio da fase com os WAVs gerados pelo probe. A correlação
+máxima foi 0,44 (`b3 s7` na janela 351–355 s) e 0,56 (`b3 s2` na janela
+167–172 s), longe do ~1,0 esperado para o mesmo som isolado. A explicação mais
+provável: cada `01` chega junto de um pacote `05` e um `14` com parâmetros por
+canal (volume, pan, pitch), e o probe não os reaplica — então os registradores
+do slot não são os mesmos e a forma de onda muda. Reproduzir esses pacotes no
+probe é o próximo passo para uma identificação por correlação.
 
 As janelas de áudio estão em `build-scsp/tmp-test/boss-clips/`
 (`09-transition-350-356.wav`, `08-three-oneshots-352.2-354.6.wav`,
 `03-c6b3s14-355-360.wav`, `04-c1b0s15-16-364-369.wav`,
-`05-boss-section-370-378.wav`). Nomear o WARNING exige escuta: a mecânica e o
-instante estão medidos, o nome depende de ouvir os clipes.
+`05-boss-section-370-378.wav`). Nomear o WARNING exige escuta: a mecânica, o
+instante e o conjunto exclusivo estão medidos; o nome depende de ouvir os
+clipes.
 
 ## A família de 42 bytes é um one-shot parametrizado
 
