@@ -87,6 +87,8 @@ public:
         std::uint32_t driverPc{};
         std::uint32_t slotMask{}; // Bit per sounding slot, for voice triage.
         std::uint64_t driverUnmappedReads{}, driverUnmappedWrites{}, slotKeyOns{}, slotKeyOffs{};
+        // Sound-CPU core calls, i.e. how finely the 68000 is interleaved.
+        std::uint64_t soundCpuCalls{};
         // Sound sources the earlier model counted as unsupported are now
         // synthesized; these counters show how often each path is used.
         std::uint64_t noiseSamples{}, pitchLfoSamples{}, amplitudeLfoSamples{};
@@ -139,6 +141,18 @@ public:
     // One scheduler step of sound time. Called by the event scheduler, or by
     // tests that drive the audio clock directly.
     void onBlockTick();
+    // Sound-CPU time advances with the audio clock: each step carries a share
+    // of the frame's 188,160 cycles (256 per rendered sample). Chunks smaller
+    // than the configured quantum wait for the next step, or for the VBlank
+    // flush, so a 14,000-step frame does not cost 14,000 core calls.
+    static constexpr std::uint64_t kDefaultSoundCpuChunkCycles = 64;
+    // How finely the sound CPU is interleaved with the rest of the emulation.
+    // One cycle is the floor: the budget is consumed once per core call, so a
+    // smaller chunk means more calls for the same 256 cycles per sample.
+    void setSoundCpuChunk(std::uint64_t cycles) noexcept;
+    [[nodiscard]] std::uint64_t soundCpuChunk() const noexcept {
+        return soundCpuChunkCycles_;
+    }
 
     [[nodiscard]] const Stats& stats() const noexcept;
 
@@ -152,11 +166,6 @@ private:
     void beginAudioFrame(std::size_t samplesPerChannel);
     void renderSamples(std::size_t count);
     void finishAudioFrame();
-    // Sound-CPU time advances with the audio clock: `targetCycles` is the
-    // absolute per-frame budget reached at the current scheduler step. Chunks
-    // smaller than kSoundCpuChunkCycles wait for the next step (or for the
-    // VBlank flush) so a 14,000-step frame does not cost 14,000 core calls.
-    static constexpr std::uint64_t kSoundCpuChunkCycles = 64;
     void advanceSoundCpu(std::uint64_t targetCycles, bool flush = false);
     void recordSequenceRequest(std::size_t packet);
     [[nodiscard]] bool blockClockActive() const noexcept {
@@ -223,6 +232,7 @@ private:
     // from driverCycles so a frame can finish its exact 256-cycles-per-sample
     // budget even when the last scheduler step lands short.
     std::uint64_t frameSoundCpuCycles_{};
+    std::uint64_t soundCpuChunkCycles_{kDefaultSoundCpuChunkCycles};
 };
 
 } // namespace saturn::platform

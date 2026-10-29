@@ -62,6 +62,10 @@ public:
     // a transfer requested before the first sample is executed as soon as the
     // image is known. The hook reports completion for the DMA interrupt factor.
     void setDmaCompletionHook(std::function<void()> hook);
+    // Publishes the sound-RAM image before any sample is rendered. The runtime
+    // calls this once, so a DMA issued during boot executes immediately instead
+    // of being deferred to the first rendered sample.
+    void setSoundRam(std::span<std::uint8_t> ram) noexcept;
     [[nodiscard]] bool dmaPending() const noexcept { return dmaPending_; }
 
 private:

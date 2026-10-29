@@ -62,13 +62,19 @@ void ScspTiming::advanceSamples(std::uint64_t count) noexcept {
     for (std::size_t index = 0; index < stats_.timers.size(); ++index) {
         advanceTimer(index, count);
     }
-    // Drain the MIDI output FIFO one byte per sample. A real transmitter sends
-    // 31250 baud; without a device attached the FIFO only has to empty fast
-    // enough that the driver never sees it blocked.
-    for (std::uint64_t byte = 0; byte < count; ++byte) {
-        if (midiOutputCount_ == 0U) break;
+    // Drain the MIDI output FIFO at the transmit rate: 31250 baud means one
+    // byte per 320 us, i.e. 44100 / 3125 = 14.112 audio samples per byte. A
+    // fractional credit keeps long transmissions from drifting.
+    midiTransmitAccumulator_ += static_cast<double>(count) / kMidiSamplesPerByte;
+    while (midiTransmitAccumulator_ >= 1.0) {
+        if (midiOutputCount_ == 0U) {
+            // An idle transmitter does not bank credit for a later burst.
+            midiTransmitAccumulator_ = 0.0;
+            break;
+        }
         midiOutputRead_ = static_cast<std::uint8_t>((midiOutputRead_ + 1U) % kMidiFifoSize);
         --midiOutputCount_;
+        midiTransmitAccumulator_ -= 1.0;
     }
 }
 

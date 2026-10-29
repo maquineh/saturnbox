@@ -485,6 +485,14 @@ std::size_t ScspSynth::activeVoiceCount() const noexcept {
 void ScspSynth::setDmaCompletionHook(std::function<void()> hook) {
     dmaCompletion_ = std::move(hook);
 }
+void ScspSynth::setSoundRam(std::span<std::uint8_t> ram) noexcept {
+    soundRam_ = ram;
+    // A transfer queued while the image was unknown can run now.
+    if (dmaPending_ && !soundRam_.empty()) {
+        dmaPending_ = false;
+        executeDma();
+    }
+}
 std::uint32_t ScspSynth::ramWordAt(std::uint32_t address) const noexcept {
     if (address + 2U > soundRam_.size()) return 0U;
     return (static_cast<std::uint32_t>(soundRam_[address]) << 8U) |

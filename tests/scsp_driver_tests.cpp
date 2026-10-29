@@ -125,6 +125,35 @@ void soundCpuAdvancesInSubSampleChunks() {
     REQUIRE(sound.stats().driverCycles < 735U * 256U + 256U);
     REQUIRE(sound.stats().audioFrames == 1U);
 }
+
+void soundCpuChunkControlsCallGranularity() {
+    using Sound = saturn::platform::ScspRuntime;
+    const auto run = [](std::uint64_t chunk) {
+        Sound sound;
+        REQUIRE(sound.enableDriverCpu());
+        REQUIRE(sound.write(Sound::kRamBase, 4, 0x8000U));
+        REQUIRE(sound.write(Sound::kRamBase + 4U, 4, 0x100U));
+        REQUIRE(sound.write(Sound::kRamBase + 0x100U, 2, 0x60FEU));
+        sound.setSoundCpuEnabled(true);
+        sound.setAudioFrameBlocks(7350); // ~25.6 sound-CPU cycles per step.
+        sound.setSoundCpuChunk(chunk);
+        for (int step = 0; step < 100; ++step) sound.onBlockTick();
+        return sound.stats();
+    };
+    const auto fine = run(16);
+    const auto coarse = run(256);
+    // A smaller chunk means more core calls for the same executed budget.
+    REQUIRE(fine.soundCpuCalls > coarse.soundCpuCalls);
+    REQUIRE(fine.soundCpuCalls >= 90U);
+    REQUIRE(coarse.soundCpuCalls <= 12U);
+    // Both stay on the 25.6-cycles-per-step budget (2560 cycles in 100 steps).
+    REQUIRE(fine.driverCycles >= 2400U);
+    REQUIRE(fine.driverCycles < 2900U);
+    REQUIRE(coarse.driverCycles >= 2400U);
+    REQUIRE(coarse.driverCycles < 2900U);
+    Sound defaults;
+    REQUIRE(defaults.soundCpuChunk() == Sound::kDefaultSoundCpuChunkCycles);
+}
 #endif
 
 #ifdef SATURNBOX_HAS_M68K
@@ -296,6 +325,7 @@ void registerScspDriverTests(test::Registry& registry) {
 #ifdef SATURNBOX_HAS_M68K
     registry.add("SCSP: sound CPU executes inside the audio frame", soundCpuRunsInsideTheFrame);
     registry.add("SCSP: sound CPU advances in sub-sample chunks", soundCpuAdvancesInSubSampleChunks);
+    registry.add("SCSP: sound CPU chunk controls call granularity", soundCpuChunkControlsCallGranularity);
     registry.add("SCSP: invalid reset vectors report an error and can recover", invalidResetVectorsFailWithoutAcknowledgingCommands);
     registry.add("SCSP: real 68000 configures slots and emits PCM", realDriverWritesSlotsAndProducesPcm);
     registry.add("SCSP: realtime device preserves the real driver block clock",

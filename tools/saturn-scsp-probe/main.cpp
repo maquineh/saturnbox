@@ -47,7 +47,7 @@ void writePcm16(std::ostream& output, const std::array<float, 2>& sample) {
 // LFOs, slot modulation and the effect DSP into the same sound-RAM image.
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "usage: saturn-scsp-probe <driver-or-sound-ram.bin> [cycles=1000000] [register-writes.csv] [--no-timers|--test-master-volume|--replay-pending] [--mark-loaded] [--play-sequence BANK:SEQ] [--sequence-control N] [--dsp-window-log PATH] [--trace-reads START:END PATH] [--dump-final-ram PATH] [--dump-registers PATH] [--wav PATH]\n";
+        std::cerr << "usage: saturn-scsp-probe <driver-or-sound-ram.bin> [cycles=1000000] [register-writes.csv] [--no-timers|--test-master-volume|--replay-pending] [--mark-loaded] [--play-sequence BANK:SEQ] [--inject-packets HEX,HEX,...] [--sequence-control N] [--sequence-slot N] [--dsp-window-log PATH] [--trace-reads START:END PATH] [--dump-final-ram PATH] [--dump-registers PATH] [--wav PATH]\n";
         return 1;
     }
     try {
@@ -56,6 +56,10 @@ int main(int argc, char** argv) {
         std::optional<std::filesystem::path> dspWindowLogPath, readTracePath;
         std::optional<std::pair<std::uint32_t, std::uint32_t>> readTraceRange;
         std::optional<std::pair<unsigned, unsigned>> playSequence;
+        // Raw command packets (one string of hex bytes per packet), used to
+        // reproduce an in-game batch exactly, including the 05/14 parameter
+        // packets that accompany every 01 sequence start.
+        std::optional<std::vector<std::array<std::uint8_t, 5>>> injectPackets;
         unsigned sequenceControl{};
         unsigned sequenceSlot{1};
         bool markLoaded{};
@@ -97,6 +101,40 @@ int main(int argc, char** argv) {
                 if (option >= argc) throw std::runtime_error("--sequence-control requires a number");
                 sequenceControl = static_cast<unsigned>(std::stoul(argv[option++]));
                 if (sequenceControl > 255U) throw std::runtime_error("--sequence-control must fit a byte");
+            } else if (argument == "--inject-packets") {
+                if (option >= argc) throw std::runtime_error("--inject-packets requires bytes");
+                if (injectPackets) throw std::runtime_error("--inject-packets was specified more than once");
+                injectPackets.emplace();
+                std::string text = argv[option++];
+                std::size_t start = 0;
+                while (start <= text.size()) {
+                    const auto end = text.find(',', start);
+                    const auto token = text.substr(start, end == std::string::npos
+                                                              ? std::string::npos : end - start);
+                    if (!token.empty()) {
+                        std::array<std::uint8_t, 5> packet{};
+                        std::size_t written{};
+                        std::size_t at = 0;
+                        while (at < token.size() && written < packet.size()) {
+                            if (token[at] == '-' || token[at] == ':') { ++at; continue; }
+                            if (at + 1 >= token.size() + 0 && at + 1 > token.size())
+                                throw std::runtime_error("--inject-packets has an odd hex digit count");
+                            const auto byte = static_cast<std::uint8_t>(
+                                std::stoul(token.substr(at, 2), nullptr, 16));
+                            packet[written++] = byte;
+                            at += 2;
+                        }
+                        if (written < 2)
+                            throw std::runtime_error("--inject-packets needs at least a command and an argument");
+                        injectPackets->push_back(packet);
+                    }
+                    if (end == std::string::npos) break;
+                    start = end + 1;
+                }
+                if (injectPackets->empty())
+                    throw std::runtime_error("--inject-packets is empty");
+                if (injectPackets->size() > 7)
+                    throw std::runtime_error("--inject-packets accepts at most 7 packets");
             } else if (argument == "--sequence-slot") {
                 if (option >= argc) throw std::runtime_error("--sequence-slot requires 0..7");
                 sequenceSlot = static_cast<unsigned>(std::stoul(argv[option++]));
@@ -157,6 +195,7 @@ int main(int argc, char** argv) {
         std::vector<std::uint8_t> registers(0x1000U);
         saturn::platform::ScspTiming timing;
         saturn::platform::ScspSynth synth;
+        synth.setSoundRam(ram);
         synth.setDmaCompletionHook([&] { timing.notifyDmaCompletion(); });
         std::ofstream wav;
         if (wavPath) {
@@ -344,6 +383,41 @@ int main(int argc, char** argv) {
             }
             // 2) Sequence command, queued once the map exists and the batch (if
             // any) has been handed to the driver.
+            if (injectPackets && !sequenceQueued && cpu.stats().cyclesExecuted >= 100000U &&
+                (mode != "--replay-pending" || injected)) {
+                auto ready = !markLoaded || loadedMapSeen;
+                if (!ready) {
+                    try { markVerifiedLoadedMap(); ready = true; }
+                    catch (const std::runtime_error&) { ready = false; }
+                }
+                if (ready) {
+                    const auto host = read(0x404U, 4U);
+                    if (host < 0x500U || host > ram.size() - 0x100U)
+                        throw std::runtime_error("driver host command pointer is invalid");
+                    std::fill_n(ram.begin() + host, 0x80U, 0U);
+                    // The game sends each 01 together with a 05 and a 14
+                    // carrying the per-channel parameters; replaying all of
+                    // them is what reproduces the in-game slot state.
+                    for (std::size_t index = 0; index < injectPackets->size(); ++index) {
+                        const auto packet = host + (1U + index) * 16U;
+                        const auto& bytes = (*injectPackets)[index];
+                        for (std::size_t byte = 0; byte < bytes.size(); ++byte)
+                            ram[packet + byte] = bytes[byte];
+                    }
+                    ram[0x4E0U] |= 0x80U;
+                    const auto& stats = synth.stats();
+                    baseKeyOns = stats.keyOns;
+                    baseKeyOffs = stats.keyOffs;
+                    baseNoise = stats.noiseSamples;
+                    basePitchLfo = stats.pitchLfoSamples;
+                    baseAmpLfo = stats.amplitudeLfoSamples;
+                    baseFm = stats.fmSamples;
+                    baseDspSend = stats.dspSendSamples;
+                    baseDspEffect = stats.dspEffectSamples;
+                    baseDspSteps = synth.dsp().stats().steps;
+                    sequenceQueued = true;
+                }
+            }
             if (playSequence && !sequenceQueued && cpu.stats().cyclesExecuted >= 100000U &&
                 (mode != "--replay-pending" || injected)) {
                 auto ready = !markLoaded || loadedMapSeen;

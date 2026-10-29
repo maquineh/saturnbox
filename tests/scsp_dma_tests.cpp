@@ -91,22 +91,48 @@ void dmaTransferLargerThanTheImageCountsDroppedWords() {
     REQUIRE(synth.stats().dmaDropped == 3U); // 0x10, 0x12 and 0x14 do not.
 }
 
-void midiOutputFifoReachesTheStatusWord() {
+void dmaRunsImmediatelyOnceTheImageIsPublished() {
+    ScspSynth synth;
+    std::array<std::uint8_t, 0x100> ram{};
+    // Publishing the image up front removes the "deferred to the first sample"
+    // case: a transfer during sound-driver boot runs at once.
+    synth.setSoundRam(ram);
+    put(synth, 0x0000, 0x2320);
+    put(synth, 0x412, 0x0010);
+    put(synth, 0x414, 0x0000);
+    put(synth, 0x416, static_cast<std::uint16_t>(0x0002U | 0x2000U | 0x1000U));
+    REQUIRE(!synth.dmaPending());
+    REQUIRE(synth.stats().dmaTransfers == 1U);
+    REQUIRE(ram[0x10] == 0x23U);
+    REQUIRE(ram[0x11] == 0x20U);
+}
+
+void midiOutputKeepsTheTransmitRate() {
     ScspTiming timing;
-    const auto empty = timing.read(ScspTiming::kMidiStatus, 2).value();
-    REQUIRE((empty & 0x0800U) != 0U); // MOEMPTY
-    REQUIRE((empty & 0x0100U) != 0U); // MIEMPTY
     REQUIRE(timing.write(ScspTiming::kMidiOutput, 1, 0xF0U));
     REQUIRE(timing.write(ScspTiming::kMidiOutput, 1, 0x7EU));
-    const auto busy = timing.read(ScspTiming::kMidiStatus, 2).value();
-    REQUIRE((busy & 0x0800U) == 0U); // Output FIFO not empty.
-    REQUIRE(timing.stats().midiBytesOut == 2U);
-    // One byte drains per audio sample; the FIFO only has to empty promptly.
+    REQUIRE((timing.read(ScspTiming::kMidiStatus, 2).value() & 0x0800U) == 0U);
+    // 31250 baud is ~14.1 audio samples per byte, so one sample sends nothing.
     timing.advanceSamples(1);
-    REQUIRE(timing.takeMidiOutput() == 0x7EU);
-    REQUIRE(timing.takeMidiOutput() == 0U);
-    timing.advanceSamples(1);
+    REQUIRE((timing.read(ScspTiming::kMidiStatus, 2).value() & 0x0800U) == 0U);
+    timing.advanceSamples(14);
+    REQUIRE((timing.read(ScspTiming::kMidiStatus, 2).value() & 0x0800U) == 0U);
+    timing.advanceSamples(14);
     REQUIRE((timing.read(ScspTiming::kMidiStatus, 2).value() & 0x0800U) != 0U);
+    REQUIRE(timing.takeMidiOutput() == 0U);
+}
+
+void midiOutputDrainsOneBytePerSerialFrame() {
+    ScspTiming timing;
+    REQUIRE(timing.write(ScspTiming::kMidiOutput, 1, 0x90U));
+    unsigned samples{};
+    while ((timing.read(ScspTiming::kMidiStatus, 2).value() & 0x0800U) == 0U &&
+           samples < 100U) {
+        timing.advanceSamples(1);
+        ++samples;
+    }
+    REQUIRE(samples >= 14U);
+    REQUIRE(samples <= 16U);
 }
 
 void midiInputRaisesTheInterruptFactorAndPopsOnRead() {
@@ -167,8 +193,10 @@ void registerScspDmaTests(test::Registry& registry) {
     registry.add("SCSP DMA: sound RAM to register", dmaCopiesSoundRamToRegisters);
     registry.add("SCSP DMA: gate mode clears the destination", dmaGateClearsTheRegisterDestination);
     registry.add("SCSP DMA: deferred until the RAM image is known", dmaRequestedBeforeAnySampleRunsOnTheNextSample);
+    registry.add("SCSP DMA: immediate once the image is published", dmaRunsImmediatelyOnceTheImageIsPublished);
     registry.add("SCSP DMA: short image counts dropped words", dmaTransferLargerThanTheImageCountsDroppedWords);
-    registry.add("SCSP MIDI: output FIFO status and drain", midiOutputFifoReachesTheStatusWord);
+    registry.add("SCSP MIDI: output status and transmit rate", midiOutputKeepsTheTransmitRate);
+    registry.add("SCSP MIDI: one byte per serial frame", midiOutputDrainsOneBytePerSerialFrame);
     registry.add("SCSP MIDI: input raises IRQ and pops on read", midiInputRaisesTheInterruptFactorAndPopsOnRead);
     registry.add("SCSP MIDI: input overflow is reported", midiInputOverflowIsReported);
     registry.add("SCSP DMA: completion raises the interrupt factor", dmaCompletionRaisesTheInterruptFactor);

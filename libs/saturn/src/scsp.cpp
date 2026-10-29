@@ -30,6 +30,9 @@ struct ScspRuntime::DriverBackend {
     explicit DriverBackend(ScspRuntime& runtime) : owner(runtime) {
         // SCSP DMA completion is an interrupt factor owned by ScspTiming.
         synth.setDmaCompletionHook([this] { timing.notifyDmaCompletion(); });
+        // The RAM image is fixed for the lifetime of the runtime; publishing it
+        // here lets a DMA issued during sound-driver boot run immediately.
+        synth.setSoundRam(owner.ram_);
 #ifdef SATURNBOX_HAS_M68K
         cpu = std::make_unique<M68k>(M68k::Bus{
             [this](auto a) { return static_cast<std::uint8_t>(readBus(a, 1U)); },
@@ -109,6 +112,7 @@ struct ScspRuntime::DriverBackend {
         }
         owner.stats_.driverCycles += executed;
         owner.stats_.driverPc = cpu->pc();
+        if (executed != 0U) ++owner.stats_.soundCpuCalls;
 #else
         static_cast<void>(cycles);
 #endif
@@ -418,10 +422,16 @@ void ScspRuntime::setAudioFrameBlocks(std::size_t blocksPerFrame) noexcept {
     frameSoundCpuCycles_ = 0;
 }
 
+void ScspRuntime::setSoundCpuChunk(std::uint64_t cycles) noexcept {
+    // One cycle is the floor; the budget is consumed once per core call, so a
+    // smaller value means finer interleaving at a higher call cost.
+    soundCpuChunkCycles_ = cycles == 0U ? 1U : cycles;
+}
+
 void ScspRuntime::advanceSoundCpu(std::uint64_t targetCycles, bool flush) {
     if (!driver_ || frameSoundCpuCycles_ >= targetCycles) return;
     const auto due = targetCycles - frameSoundCpuCycles_;
-    if (!flush && due < kSoundCpuChunkCycles) return;
+    if (!flush && due < soundCpuChunkCycles_) return;
     frameSoundCpuCycles_ += driver_->runCpu(due);
 }
 

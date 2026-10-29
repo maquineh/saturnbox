@@ -24,6 +24,9 @@ public:
     static constexpr std::uint16_t kMidiStatus = 0x404U;
     static constexpr std::uint16_t kMidiOutput = 0x406U;
     static constexpr std::size_t kMidiFifoSize = 32U;
+    // 31250 baud, 10 bits per byte: one byte every 320 us, which is
+    // 44100 / 3125 = 14.112 audio samples.
+    static constexpr double kMidiSamplesPerByte = 44100.0 / 3125.0;
     // Interrupt factor bits: 3 is MIDI and 4 is DMA completion.
     static constexpr std::size_t kMidiPendingBit = 3U;
     static constexpr std::size_t kDmaPendingBit = 4U;
@@ -91,6 +94,8 @@ private:
     mutable std::uint8_t midiOutputRead_{};
     mutable std::uint8_t midiOutputWrite_{};
     mutable std::uint8_t midiOutputCount_{};
+    // Fractional byte credit for the 31250-baud transmitter.
+    mutable double midiTransmitAccumulator_{};
 };
 
 } // namespace saturn::platform

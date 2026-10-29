@@ -277,13 +277,35 @@ As cinco pendências desta lista foram investigadas. Resultado por item:
 
 ### Pendências restantes
 
-- WARNING e explosão na fase: a rota validada cobre o começo do estágio, sem
-  chefe e sem garantir inimigos destruídos. Tiro, dash e salto já estão
-  identificados pelo gatilho (item 2).
-- O interleaving é por passo do scheduler com execução a cada 64 ciclos; ainda
-  não é ciclo a ciclo do barramento.
-- O DMA usa a última imagem de RAM conhecida; um pedido antes da primeira
-  amostra é adiado para a próxima, não rejeitado.
-- O MIDI não modela 31.250 baud nem handshake externo.
-- A captura da fase satura em 1,0 em vários trechos, o que impede casar a forma
-  de onda do efeito com o WAV offline; uma captura com MVOL menor permitiria.
+Atualizado em 29/10, depois de vasculhar a lista anterior:
+
+- **Explosão e WARNING na fase.** A rota com pokes de vida chega ao chefe e a
+  explosão ficou identificada por três evidências (visual, espectral e de
+  gatilho). O WARNING não tem sequência dedicada: a música da fase continua na
+  chegada do chefe e o primeiro cue novo vem depois da luta. Ver
+  [SCSP-SEQUENCE-ANALYSIS.md](SCSP-SEQUENCE-ANALYSIS.md).
+- **Interleaving.** O quantum agora é configurável (`setSoundCpuChunk`) e aceita
+  de 1 ciclo até o valor antigo. O padrão de 64 ciclos dá ~1/4 de amostra por
+  execução e ~2.940 chamadas por quadro; 16 ciclos dá ~1 chamada por passo
+  (14.000 por quadro, o custo antigo) para validação fina. O total continua
+  exatamente 256 ciclos por amostra. **Ciclo a ciclo do barramento não é
+  possível com o modelo atual**: o SIR/JIT conta blocos, não ciclos de SH-2, e
+  não existe um relógio do qual derivar o instante exato de cada acesso. O
+  estatística `soundCpuCalls` mede a granularidade real.
+- **DMA antes da primeira amostra.** Resolvido: `ScspSynth::setSoundRam` publica
+  a imagem de RAM, e o runtime e o probe a chamam na construção — um DMA pedido
+  durante o boot executa na hora. O adiamento só existe para quem usa a
+  `ScspSynth` isolada sem publicar a imagem (coberto por teste).
+- **MIDI.** Passou a modelar 31.250 baud: um byte a cada 44100/3125 = 14,112
+  amostras, com crédito fracionário para não derivar. O que continua não
+  modelado é o handshake externo (um dispositivo do outro lado do cabo): os
+  bytes de entrada vêm de `pushMidiInput`, sem colisão nem arbitragem de linha.
+- **Saturação em 1,0 na seção do chefe.** Continua aberta: é um ajuste de ganho
+  a investigar (MVOL e soma de TL), não um erro de síntese.
+
+Sobre a identificação nominal pelos clipes: o casamento por forma de onda não
+fecha porque o jogo **troca os bancos PCM durante a fase** — o dump usado nos
+renders offline é de outro trecho, então a mesma sequência toca amostras
+diferentes. O probe ganhou `--inject-packets` para reproduzir um lote exato do
+jogo; com ele descobrimos que o driver recebe `05` e `14` (parâmetros de canal)
+**antes** do `01` da sequência, e que a ordem importa.
