@@ -133,6 +133,7 @@ struct Arguments {
     bool window{};
     bool audioLive{};
     bool scspDriver{};
+    bool profile{};
     std::string_view renderer{"cpu"};
     bool rendererSpecified{};
     bool frameChangesOnly{};
@@ -2521,6 +2522,10 @@ public:
                            const saturn::sir::MachineState& state)
         : downstream_(downstream), state_(state) {}
 
+    [[nodiscard]] bool requiresStateSnapshot(saturn::core::Address address) const noexcept override {
+        return downstream_.requiresStateSnapshot(address);
+    }
+
     void setExecutionContext(const saturn::sir::ExecutionContext& context) override {
         step_ = context.step;
         block_ = context.blockAddress;
@@ -2654,7 +2659,7 @@ void usage(std::ostream& stream) {
            << "      [--frame-capture-after-blocks <count>] (requires --frame-dir)\n"
            << "      [--trace-cd-sectors] (requires --frame-dir; write CD PLAY/sector/FIFO CSVs)\n"
            << "      [--steps <count>] [--vblank-blocks <count>] [--trace]\n"
-           << "      [--trace-game]\n"
+           << "      [--trace-game] [--profile] (sample device costs)\n"
            << "      [--trace-foreground]\n"
            << "      [--continue-after-execdmp] [--interpreter]\n";
 }
@@ -2934,6 +2939,8 @@ std::optional<Arguments> parseArguments(int argc, char** argv) {
             }
         } else if (option == "--trace") {
             arguments.trace = true;
+        } else if (option == "--profile") {
+            arguments.profile = true;
         } else if (option == "--trace-cd-sectors") {
             arguments.traceCdSectors = true;
         } else if (option == "--interpreter") {
@@ -5189,11 +5196,12 @@ public:
             audioBuffers_.begin(), audioBuffers_.end(),
             [](const auto& buffer) { return buffer.busy; }));
         if (audioStarted_ && queued == 0U) {
-            audioStarted_ = false;
+            if (audioUnderruns_ < audioUnderrunFrames_.size())
+                audioUnderrunFrames_[audioUnderruns_] = videoFrames_;
             ++audioUnderruns_;
-            lock.unlock();
-            waveOutPause(waveOut_);
-            lock.lock();
+            // An empty queue leaves waveOut running. Feed the next block
+            // directly: pausing/restarting here can add a device stall to
+            // the original late frame and disrupt the presentation clock.
         }
         AudioBuffer* target = nullptr;
         for (auto& buffer : audioBuffers_) {
@@ -5224,17 +5232,13 @@ public:
             ++audioWriteErrors_;
             return;
         }
-        // Prime the device with three blocks once. After an underrun, resume on the
-        // first available frame instead of inserting another 50 ms silence
-        // gap while waiting to rebuild the initial reserve.
-        const auto requiredPrebuffer = audioHasStarted_ ? 1U : kAudioPrebufferCount;
-        if (!audioStarted_ && queued + 1U >= requiredPrebuffer) {
+        // Only startup needs a paused device and the initial reserve.
+        if (!audioStarted_ && queued + 1U >= kAudioPrebufferCount) {
             lock.unlock();
             const auto restarted = waveOutRestart(waveOut_);
             lock.lock();
             if (restarted == MMSYSERR_NOERROR) {
                 audioStarted_ = true;
-                audioHasStarted_ = true;
                 nextFrame_ = Clock::now();
             }
         }
@@ -5259,6 +5263,13 @@ public:
         frameTiming_.print("frame interval");
         paintTiming_.print("window paint");
         sleepOvershoot_.print("pacing sleep overshoot");
+        if (audioUnderruns_ != 0U) {
+            std::cout << "  audio underrun presentation frames:";
+            for (std::size_t index = 0U;
+                 index < std::min(audioUnderruns_, audioUnderrunFrames_.size()); ++index)
+                std::cout << ' ' << audioUnderrunFrames_[index];
+            std::cout << '\n';
+        }
 #endif
     }
 
@@ -5596,7 +5607,8 @@ private:
     std::array<AudioBuffer, kAudioBufferCount> audioBuffers_{};
     std::mutex audioMutex_;
     std::condition_variable audioReady_;
-    bool audioStarted_{}, audioHasStarted_{};
+    bool audioStarted_{};
+    std::array<std::size_t, 128U> audioUnderrunFrames_{};
     saturn::host::Win32Input input_;
     bool helpVisible_{}, vulkan_{};
     bool timerPeriodEnabled_{};
@@ -5687,6 +5699,7 @@ int executeMap(const saturn::core::MemoryMap& image, saturn::core::Address entry
               << "  completed block steps: " << execution.steps << '\n'
               << "  last block: " << saturn::sh2::formatAddress(execution.address) << '\n'
               << "  dynamic target requests: " << resolution.requests << '\n'
+              << "  resolver code cache hits: " << resolution.codeCacheHits << '\n'
               << "  reused dynamic blocks: " << resolution.reusedBlocks << '\n'
               << "  blocks lowered on demand: " << resolution.loweredBlocks << '\n'
               << "  resolver block re-lowerings: " << resolution.replacedBlocks << '\n'
@@ -5899,6 +5912,16 @@ int boot(const Arguments& arguments) {
     bool frameCaptured{};
     std::size_t frameCaptureArmedAt{};
     std::vector<float> capturedAudio;
+    if (arguments.audioOutput && arguments.vblankPeriodBlocks != 0U) {
+        // Reserve up to five minutes before playback starts. Growing this
+        // vector during recording can otherwise copy tens of MiB on the
+        // emulation thread and starve the device queue.
+        const auto frames = std::min<std::size_t>(
+            arguments.maxSteps / arguments.vblankPeriodBlocks, 5U * 60U * 60U) + 1U;
+        capturedAudio.reserve(frames *
+            (saturn::platform::ScspRuntime::kAudioSampleRate / 60U) *
+            saturn::platform::ScspRuntime::kAudioChannels);
+    }
     std::optional<RealtimeFrontend> realtime;
     if (arguments.window || arguments.audioLive) {
         realtime.emplace();
@@ -6207,6 +6230,7 @@ int boot(const Arguments& arguments) {
         }
     }
     saturn::platform::ScuEventScheduler scheduler(arguments.vblankPeriodBlocks);
+    scheduler.setProfilingEnabled(arguments.profile);
     saturn::platform::SlaveSh2 slave;
     // NTSC, 320-dot CPU clock. Tie FRT to the same guest time as video/PCM;
     // eight cycles/block becomes five times too slow at the interactive budget.
@@ -6597,6 +6621,7 @@ int boot(const Arguments& arguments) {
         }
     };
     saturn::sir::ProgramExecutionResult execution;
+    const auto executionStart = std::chrono::steady_clock::now();
     try {
         execution = saturn::sir::ProgramExecutor{}.run(module.blockAt(entry), state, options);
     } catch (const FrontendQuit&) {
@@ -6612,6 +6637,23 @@ int boot(const Arguments& arguments) {
         execution.status = saturn::sir::ProgramStatus::InterpreterFailure;
         execution.address = failure.address;
         execution.steps = failure.step;
+    }
+    const auto executionSeconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - executionStart).count();
+    if (arguments.profile) {
+        std::cout << "  profile execution seconds: " << executionSeconds << '\n';
+        const auto printProfile = [](std::string_view label, const auto& timing) {
+            std::cout << "  profile " << label << ": estimated-ms="
+                      << timing.estimatedNanoseconds / 1.0e6
+                      << ", measured-ms=" << timing.sampledNanoseconds / 1.0e6
+                      << ", sampled=" << timing.sampledCalls << '/' << timing.calls << '\n';
+        };
+        const auto& timings = scheduler.stats();
+        printProfile("SCSP block", timings.scspBlockTick);
+        printProfile("SCSP mailbox", timings.scspSchedulerTick);
+        printProfile("MMIO scheduler", timings.mmioSchedulerTick);
+        printProfile("SCSP VBlank", timings.scspVBlank);
+        printProfile("video VBlank OUT", timings.videoVBlankOut);
     }
     if (liveDebug) {
         liveDebug->flush();
@@ -6963,6 +7005,7 @@ int boot(const Arguments& arguments) {
               << "  presented frames: " << presentedFrames
               << (frameWriteFailure ? " (write-error)" : "") << '\n'
               << "  dynamic target requests: " << resolver.stats().requests << '\n'
+              << "  resolver code cache hits: " << resolver.stats().codeCacheHits << '\n'
               << "  blocks lowered on demand: " << resolver.stats().loweredBlocks << '\n'
               << "  resolver block re-lowerings: " << resolver.stats().replacedBlocks << '\n'
               << "  resolver re-lowering addresses:";

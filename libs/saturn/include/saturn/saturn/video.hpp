@@ -412,7 +412,8 @@ private:
     void flushVdp1Batch(bool wait = true);
     void synchronizeVdp1() const;
     void composeVdp2(std::vector<std::uint32_t>& pixels,
-                     std::array<VideoFrame, 4>* layerFrames = nullptr);
+                     std::array<VideoFrame, 4>* layerFrames = nullptr,
+                     bool resolveOutput = true);
     void composeVdp2Back(std::vector<std::uint32_t>& pixels);
     void composeVdp2RotationBitmap(std::vector<std::uint32_t>& pixels,
                                    std::vector<std::uint8_t>* colorCalculationFlags);
@@ -484,6 +485,9 @@ private:
     std::uint16_t vdp2Tvstat_{};
     bool vdp2PriorityConfigured_{};
     std::vector<Vdp2CompositePixel> vdp2CompositePixels_;
+    // Layers are rendered/merged sequentially; retain scratch storage between frames.
+    std::vector<std::uint32_t> vdp2LayerScratch_;
+    std::vector<std::uint8_t> vdp2CalculationScratch_;
     Vdp1CommandStats vdp1CommandStats_{};
     std::shared_ptr<Vdp1ComputeRenderer> vdp1Renderer_;
     std::vector<Vdp1Primitive> vdp1Batch_;

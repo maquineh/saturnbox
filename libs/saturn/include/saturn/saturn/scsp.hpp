@@ -160,7 +160,10 @@ private:
     void advanceSoundCpu(std::uint64_t targetCycles, bool flush = false);
     void recordSequenceRequest(std::size_t packet);
     [[nodiscard]] bool blockClockActive() const noexcept {
-        return audioFrameBlocks_ != 0U && !realtimeAudioClock_;
+        // Device playback must not move the real 68000 ahead of the SH-2.
+        // Keep driver execution/register writes on the same guest clock in
+        // headless and windowed runs; wall time is only a legacy HLE option.
+        return audioFrameBlocks_ != 0U && (driver_ || !realtimeAudioClock_);
     }
     void serviceSoundCommands();
     struct DriverBackend;

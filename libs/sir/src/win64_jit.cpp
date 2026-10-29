@@ -322,6 +322,7 @@ struct CompiledBlock {
     void* executableMemory{};
     NativeBlockFunction function{};
     StaticBlockSignature signature{};
+    std::uint64_t revision{};
     std::size_t valueCount{};
     bool usesMemory{};
     bool usesDenseState{true};
@@ -784,31 +785,58 @@ struct CompiledBlock {
 
 struct Win64JitBlockExecutor::Impl {
 #if SATURN_SIR_HAS_WIN64_JIT
+    struct UnsupportedBlock {
+        std::uint64_t revision{};
+        StaticBlockSignature signature{};
+    };
+
     std::unordered_map<const BasicBlock*, std::unique_ptr<CompiledBlock>> compiled;
-    std::unordered_map<const BasicBlock*, StaticBlockSignature> unsupported;
+    std::unordered_map<const BasicBlock*, UnsupportedBlock> unsupported;
     std::size_t executedBlocks{};
     std::size_t chainedTransfers{};
 
     CompiledBlock* findOrCompile(const BasicBlock& block) {
-        const auto signature = staticBlockSignature(block);
+        const auto revision = block.revision();
         auto found = compiled.find(&block);
-        if (found != compiled.end() && found->second->signature != signature) {
-            compiled.erase(found);
-            found = compiled.end();
+        if (found != compiled.end() && found->second->revision == revision) {
+            return found->second.get();
         }
-        if (found == compiled.end()) {
-            const auto failed = unsupported.find(&block);
-            if (failed != unsupported.end() && failed->second == signature) return nullptr;
-            auto result = compileBlock(block);
-            if (!result) {
-                if (block.isLowered()) unsupported.insert_or_assign(&block, signature);
+        auto failed = unsupported.find(&block);
+        if (failed != unsupported.end() && failed->second.revision == revision) {
+            return nullptr;
+        }
+
+        // Revisions change on append/reset. Only rebuild the structural
+        // signature when a revision changed; stable hot blocks avoid both the
+        // per-instruction hash walk and its temporary canonical-value map.
+        const auto signature = staticBlockSignature(block);
+        if (found != compiled.end()) {
+            if (found->second->signature == signature) {
+                found->second->revision = revision;
+                return found->second.get();
+            }
+            compiled.erase(found);
+        }
+        if (failed != unsupported.end()) {
+            if (failed->second.signature == signature) {
+                failed->second.revision = revision;
                 return nullptr;
             }
-            (*result)->signature = signature;
-            unsupported.erase(&block);
-            found = compiled.emplace(&block, std::move(*result)).first;
+            unsupported.erase(failed);
         }
-        return found->second.get();
+
+        auto result = compileBlock(block);
+        if (!result) {
+            if (block.isLowered()) {
+                unsupported.insert_or_assign(&block,
+                    UnsupportedBlock{revision, signature});
+            }
+            return nullptr;
+        }
+        (*result)->signature = signature;
+        (*result)->revision = revision;
+        unsupported.erase(&block);
+        return compiled.emplace(&block, std::move(*result)).first->second.get();
     }
 
     static void prepare(CompiledBlock& block, RuntimeContext& context) {

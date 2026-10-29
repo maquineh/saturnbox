@@ -186,6 +186,68 @@ void explicitVblankStillHasAnOutBoundary() {
     REQUIRE(scheduler.stats().vblankOutEvents == 1U);
     REQUIRE(mmio.video().frameCount() == 1U);
 }
+
+void scaledSpriteColumnsUseClippedRelativeIndices() {
+    constexpr int left = -400, top = -7, width = 800, height = 253;
+    constexpr int sourceWidth = 16, sourceHeight = 2;
+    const auto sourceColor = [](int x, int y) {
+        return static_cast<std::uint16_t>(0x8000U | (x + 1) | ((y + 1) << 5));
+    };
+    const auto expand5 = [](unsigned value) { return value * 255U / 31U; };
+    for (unsigned zoom : {0U, 5U}) { // A/C endpoints and top-left zoom anchor.
+        for (unsigned flip = 0U; flip < 4U; ++flip) {
+            VideoRuntime video; // No compute renderer: exercise CPU sourceColumns.
+            configure(video);
+            REQUIRE(video.write(regs + 2U, 2U, 3U));
+            const auto command = VideoRuntime::kVdp1Base;
+            REQUIRE(video.write(command, 2U, 1U | (flip << 4U) | (zoom << 8U)));
+            REQUIRE(video.write(command + 4U, 2U, 5U << 3U)); // RGB555 texture.
+            REQUIRE(video.write(command + 8U, 2U, 0x100U / 8U));
+            REQUIRE(video.write(command + 10U, 2U, 0x0202U)); // 16x2 source.
+            REQUIRE(video.write(command + 12U, 2U, static_cast<std::uint16_t>(left)));
+            REQUIRE(video.write(command + 14U, 2U, static_cast<std::uint16_t>(top)));
+            if (zoom == 0U) {
+                REQUIRE(video.write(command + 20U, 2U, left + width - 1));
+                REQUIRE(video.write(command + 22U, 2U, top + height - 1));
+            } else {
+                REQUIRE(video.write(command + 16U, 2U, width - 1));
+                REQUIRE(video.write(command + 18U, 2U, height - 1));
+            }
+            REQUIRE(video.write(command + 0x20U, 2U, 0x8000U));
+            for (int y = 0; y < sourceHeight; ++y)
+                for (int x = 0; x < sourceWidth; ++x)
+                    REQUIRE(video.write(command + 0x100U + (y * sourceWidth + x) * 2U,
+                                        2U, sourceColor(x, y)));
+            REQUIRE(video.write(regs + 4U, 2U, 1U));
+            // minX=400 exceeds the cache size; only x-minX is a valid index.
+            // Check every visible pixel, including x=0/319 and y=0/239.
+            for (unsigned y = 0U; y < 240U; ++y) {
+                const auto sourceY = (static_cast<int>(y) - top) * sourceHeight / height;
+                const auto sy = (flip & 2U) != 0U ? sourceHeight - 1 - sourceY : sourceY;
+                for (unsigned x = 0U; x < 320U; ++x) {
+                    const auto sourceX = (static_cast<int>(x) - left) * sourceWidth / width;
+                    const auto sx = (flip & 1U) != 0U ? sourceWidth - 1 - sourceX : sourceX;
+                    REQUIRE(video.read(fb + (y * 512U + x) * 2U, 2U) == sourceColor(sx, sy));
+                }
+                REQUIRE(video.read(fb + (y * 512U + 320U) * 2U, 2U) == 0U);
+            }
+            REQUIRE(video.read(fb + 240U * 512U * 2U, 2U) == 0U);
+            video.presentFrame();
+            for (unsigned y : {0U, 239U}) {
+                for (unsigned x : {0U, 319U}) {
+                    const auto sourceX = (static_cast<int>(x) - left) * sourceWidth / width;
+                    const auto sourceY = (static_cast<int>(y) - top) * sourceHeight / height;
+                    const auto sx = (flip & 1U) != 0U ? sourceWidth - 1 - sourceX : sourceX;
+                    const auto sy = (flip & 2U) != 0U ? sourceHeight - 1 - sourceY : sourceY;
+                    const auto expected = 0xFF000000U |
+                        (expand5(static_cast<unsigned>(sx + 1)) << 16U) |
+                        (expand5(static_cast<unsigned>(sy + 1)) << 8U);
+                    REQUIRE(video.lastFrame().pixels[y * 320U + x] == expected);
+                }
+            }
+        }
+    }
+}
 } // namespace
 
 void registerVdp1FramebufferTests(test::Registry& registry) {
@@ -205,4 +267,6 @@ void registerVdp1FramebufferTests(test::Registry& registry) {
                  automaticTriggerWaitsForAManualBankChange);
     registry.add("VDP1: explicit VBlank includes OUT presentation",
                  explicitVblankStillHasAnOutBoundary);
+    registry.add("VDP1: scaled CPU sprite caches columns relative to clipping",
+                 scaledSpriteColumnsUseClippedRelativeIndices);
 }

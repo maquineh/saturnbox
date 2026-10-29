@@ -61,6 +61,7 @@ public:
     // block caches use this to notice self-modifying code and loaded overlays.
     [[nodiscard]] std::uint64_t memoryWriteGeneration(
         core::Address address) const noexcept;
+    [[nodiscard]] std::uint64_t memoryWriteEpoch() const noexcept;
     void setMemoryInterceptor(MemoryInterceptor* interceptor) noexcept;
     [[nodiscard]] MemoryInterceptor* memoryInterceptor() const noexcept;
     void setExecutionContext(const ExecutionContext& context);
@@ -73,7 +74,37 @@ public:
     [[nodiscard]] bool operator==(const MachineState& other) const;
 
 private:
+    struct RawPageReadCache {
+        static constexpr std::size_t kEntryCount = 64U;
+        struct Entry {
+            core::Address pageKey{};
+            const std::vector<std::uint8_t>* bytes{};
+            bool valid{};
+        };
+
+        RawPageReadCache() = default;
+        RawPageReadCache(const RawPageReadCache&) noexcept {}
+        RawPageReadCache& operator=(const RawPageReadCache&) noexcept {
+            clear();
+            return *this;
+        }
+        RawPageReadCache(RawPageReadCache&& other) noexcept { other.clear(); }
+        RawPageReadCache& operator=(RawPageReadCache&& other) noexcept {
+            clear();
+            other.clear();
+            return *this;
+        }
+
+        void clear() noexcept { entries = {}; }
+
+        std::array<Entry, kEntryCount> entries{};
+    };
+
     [[nodiscard]] core::Address backingAddress(core::Address address) const noexcept;
+    [[nodiscard]] const std::vector<std::uint8_t>* rawPageData(
+        core::Address pageKey) const noexcept;
+    void cacheRawPage(core::Address pageKey,
+                      const std::vector<std::uint8_t>* bytes) const noexcept;
     void noteMemoryWrite(core::Address address);
     void writeRaw8(core::Address address, std::uint8_t value);
     void writeRawWord(core::Address address, std::uint32_t value, std::uint8_t width);
@@ -87,7 +118,9 @@ private:
     // machine state. The canonical zero-eliding map is diagnostic only.
     std::array<std::uint32_t, kDenseStateSlots> fastState_{};
     std::unordered_map<core::Address, std::vector<std::uint8_t>> memoryPages_;
+    mutable RawPageReadCache rawPageReadCache_;
     std::unordered_map<core::Address, std::uint64_t> memoryPageWriteGenerations_;
+    std::uint64_t memoryWriteEpoch_{};
     MemoryInterceptor* interceptor_{};
 };
 

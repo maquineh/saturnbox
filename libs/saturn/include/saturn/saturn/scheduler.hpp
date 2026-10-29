@@ -25,6 +25,7 @@ public:
     static constexpr std::uint8_t kTimer0Vector = 0x43U;
     static constexpr std::size_t kScanlinesPerFrame = 263U;
     static constexpr std::size_t kVBlankScanlines = 40U;
+    static constexpr std::uint64_t kProfileSampleInterval = 1009U;
     // VDP1 command-list end (sprite draw end), SCU factor bit 13 / vector 0x4D.
     static constexpr std::uint32_t kSpriteDrawEndStatus = 0x00002000U;
     static constexpr std::uint8_t kSpriteDrawEndVector = 0x4DU;
@@ -43,6 +44,16 @@ public:
     static constexpr core::Address kDummyInterruptHandler = 0x06000610U;
 
     struct Stats {
+        struct TimingProfile {
+            // Calls is exact while profiling is enabled. Frequent paths are
+            // timed once per kProfileSampleInterval calls; estimatedNanoseconds
+            // scales their mean sample over Calls. VBlank paths sample every call.
+            std::uint64_t calls{};
+            std::uint64_t sampledCalls{};
+            std::uint64_t sampledNanoseconds{};
+            std::uint64_t estimatedNanoseconds{};
+        };
+
         std::uint64_t elapsedBlocks{};
         std::uint64_t vblankEvents{};
         std::uint64_t vblankOutEvents{};
@@ -52,6 +63,11 @@ public:
         std::uint64_t deliveredInterrupts{};
         std::uint64_t maskedEvents{};
         std::uint64_t droppedEvents{};
+        TimingProfile scspBlockTick{};
+        TimingProfile scspSchedulerTick{};
+        TimingProfile mmioSchedulerTick{};
+        TimingProfile scspVBlank{};
+        TimingProfile videoVBlankOut{};
     };
 
     // A period of zero disables automatic VBlank generation. Events can still
@@ -59,6 +75,7 @@ public:
     explicit ScuEventScheduler(std::size_t vblankPeriodBlocks = 0U) noexcept;
 
     void setVBlankPeriod(std::size_t periodBlocks) noexcept;
+    void setProfilingEnabled(bool enabled) noexcept;
     [[nodiscard]] std::size_t vblankPeriod() const noexcept;
     void requestVBlank() noexcept;
 
@@ -85,6 +102,7 @@ private:
     bool hasStep_{};
     bool reportedMasked_{};
     bool requestedVBlank_{};
+    bool profilingEnabled_{};
     Stats stats_{};
 };
 

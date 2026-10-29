@@ -11,6 +11,18 @@ option(ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer
 
 include(cmake/Musashi.cmake)
 
+option(SATURNBOX_IPO "Enable interprocedural optimization in Release builds" OFF)
+if(SATURNBOX_IPO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT SATURNBOX_IPO_SUPPORTED OUTPUT SATURNBOX_IPO_ERROR LANGUAGES CXX)
+    if(NOT SATURNBOX_IPO_SUPPORTED)
+        message(FATAL_ERROR "Release IPO is unavailable: ${SATURNBOX_IPO_ERROR}")
+    endif()
+    # Apply to our targets below, leaving the external 68000 core and its
+    # code generator on their separately validated compiler options.
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+endif()
+
 if(ENABLE_SANITIZERS)
     if(MSVC)
         message(STATUS "Enabling AddressSanitizer for MSVC (UndefinedBehaviorSanitizer is unavailable)")

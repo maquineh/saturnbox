@@ -200,7 +200,9 @@ void VideoRuntime::setDeferredComposition(bool enabled) {
 void VideoRuntime::composeFrame() {
     lastFrame_.height = frameHeight();
     lastFrame_.pixels.assign(static_cast<std::size_t>(kFrameWidth) * frameHeight(), 0xFF000000U);
-    composeVdp2(lastFrame_.pixels);
+    // Overlay resolves every output pixel, including empty sprite pixels and
+    // shadows, after inserting VDP1 into the VDP2 candidate stack.
+    composeVdp2(lastFrame_.pixels, nullptr, false);
     synchronizeVdp1();
     composeVdp1Overlay(lastFrame_.pixels);
     compositionDirty_ = false;
@@ -1435,6 +1437,7 @@ void VideoRuntime::composeVdp2RotationBitmap(
     const auto specialColorMode = static_cast<unsigned>(
         (vdp2Register(0x0EEU) >> 8U) & 0x3U);
     const auto specialColorControl = (vdp2Register(0x0ECU) & 0x0010U) != 0U;
+    const bool windowsEnabled = (vdp2Register(0x0D4U) & 0x000AU) != 0U;
 
     for (std::uint32_t y = 0U; y < frameHeight(); ++y) {
         const auto xstAccum = xst + static_cast<std::int64_t>(y) * dxst;
@@ -1452,7 +1455,7 @@ void VideoRuntime::composeVdp2RotationBitmap(
         const auto xStep = (matrix[0] * dx + matrix[1] * dy) >> 10U;
         const auto yStep = (matrix[3] * dx + matrix[4] * dy) >> 10U;
         for (std::uint32_t x = 0U; x < kFrameWidth; ++x) {
-            if (!vdp2WindowAllows(4U, x, y)) continue;
+            if (windowsEnabled && !vdp2WindowAllows(4U, x, y)) continue;
             const auto sourceX = (xp + ((kx * (xsp + xStep * x)) >> 16U)) >> 10U;
             const auto sourceY = (yp + ((ky * (ysp + yStep * x)) >> 16U)) >> 10U;
             const auto outside = sourceX < 0 || sourceY < 0 ||
@@ -1493,7 +1496,7 @@ void VideoRuntime::composeVdp2RotationBitmap(
 
 void VideoRuntime::composeVdp2(
     std::vector<std::uint32_t>& pixels,
-    std::array<VideoFrame, 4>* layerFrames) {
+    std::array<VideoFrame, 4>* layerFrames, bool resolveOutput) {
     vdp2CompositePixels_.assign(pixels.size(), Vdp2CompositePixel{});
     const auto tvmd = vdp2Register(0x000U);
     if (mapReadTraceEnabled_) {
@@ -1651,10 +1654,19 @@ void VideoRuntime::composeVdp2(
             pixels[index] = composite.topColor;
         }
     };
+    const auto prepareLayer = [&] {
+        vdp2LayerScratch_.assign(pixels.size(), transparent);
+        vdp2CalculationScratch_.assign(pixels.size(), 0U);
+    };
+    auto& layer = vdp2LayerScratch_;
+    auto& calculationFlags = vdp2CalculationScratch_;
+    // Diagnostic layer captures and map traces must still see disabled layers.
+    const auto skipZeroPriority = layerFrames == nullptr &&
+        !mapReadTraceEnabled_ && !(diagnosticCaptureEnabled_ && diagnosticSink_);
     const auto drawNbg0 = [&] {
         if ((bgon & kVdp2Nbg0Enable) == 0U) return;
-        std::vector<std::uint32_t> layer(pixels.size(), transparent);
-        std::vector<std::uint8_t> calculationFlags(pixels.size());
+        if (skipZeroPriority && n0Priority == 0U) return;
+        prepareLayer();
         if ((chctla & 0x0002U) != 0U) {
             composeVdp2Bitmap(layer, 0U, chctla, bmpna, mpofn,
                               vdp2Register(0x070U), vdp2Register(0x074U),
@@ -1671,12 +1683,12 @@ void VideoRuntime::composeVdp2(
     };
     const auto drawNbg1 = [&] {
         if ((bgon & kVdp2Nbg1Enable) == 0U) return;
+        if (skipZeroPriority && n1Priority == 0U) return;
         // NBG0's 16M-color mode consumes the fetch slots of NBG1/2/3,
         // even when their BGON bits and priorities remain programmed.
         if ((bgon & kVdp2Nbg0Enable) != 0U &&
             ((chctla >> 4U) & 0x7U) == 4U) return;
-        std::vector<std::uint32_t> layer(pixels.size(), transparent);
-        std::vector<std::uint8_t> calculationFlags(pixels.size());
+        prepareLayer();
         if ((chctla & 0x0200U) != 0U) {
             composeVdp2Bitmap(layer, 1U, chctla, bmpna, mpofn,
                               vdp2Register(0x080U), vdp2Register(0x084U),
@@ -1693,10 +1705,10 @@ void VideoRuntime::composeVdp2(
     };
     const auto drawNbg2 = [&] {
         if ((bgon & kVdp2Nbg2Enable) == 0U) return;
+        if (skipZeroPriority && n2Priority == 0U) return;
         if ((bgon & kVdp2Nbg0Enable) != 0U &&
             ((chctla >> 4U) & 0x7U) >= 2U) return;
-        std::vector<std::uint32_t> layer(pixels.size(), transparent);
-        std::vector<std::uint8_t> calculationFlags(pixels.size());
+        prepareLayer();
         composeVdp2Cell(layer, 2U, vdp2Register(0x02AU), vdp2Register(0x034U),
                         mpofn, vdp2Register(0x048U), vdp2Register(0x04AU),
                         vdp2Register(0x090U), vdp2Register(0x092U),
@@ -1707,12 +1719,12 @@ void VideoRuntime::composeVdp2(
     };
     const auto drawNbg3 = [&] {
         if ((bgon & kVdp2Nbg3Enable) == 0U) return;
+        if (skipZeroPriority && n3Priority == 0U) return;
         if (((bgon & kVdp2Nbg0Enable) != 0U &&
              ((chctla >> 4U) & 0x7U) == 4U) ||
             ((bgon & kVdp2Nbg1Enable) != 0U &&
              ((chctla >> 12U) & 0x3U) >= 2U)) return;
-        std::vector<std::uint32_t> layer(pixels.size(), transparent);
-        std::vector<std::uint8_t> calculationFlags(pixels.size());
+        prepareLayer();
         composeVdp2Cell(layer, 3U, vdp2Register(0x02AU), vdp2Register(0x036U),
                         mpofn, vdp2Register(0x04CU), vdp2Register(0x04EU),
                         vdp2Register(0x094U), vdp2Register(0x096U),
@@ -1723,8 +1735,7 @@ void VideoRuntime::composeVdp2(
     };
     const auto drawRbg0 = [&] {
         if ((bgon & 0x0010U) == 0U || rbg0Priority == 0U) return;
-        std::vector<std::uint32_t> layer(pixels.size(), transparent);
-        std::vector<std::uint8_t> calculationFlags(pixels.size());
+        prepareLayer();
         composeVdp2RotationBitmap(layer, &calculationFlags);
         mergeLayer(layer, calculationFlags, rbg0Priority, 4U, kVdp2LayerRbg0);
     };
@@ -1733,8 +1744,10 @@ void VideoRuntime::composeVdp2(
     drawNbg1();
     drawNbg0();
     drawRbg0();
-    for (std::size_t index = 0; index < pixels.size(); ++index) {
-        pixels[index] = resolveColorCalculation(vdp2CompositePixels_[index]);
+    if (resolveOutput) {
+        for (std::size_t index = 0; index < pixels.size(); ++index) {
+            pixels[index] = resolveColorCalculation(vdp2CompositePixels_[index]);
+        }
     }
 }
 
@@ -1746,6 +1759,8 @@ void VideoRuntime::composeVdp2Bitmap(std::vector<std::uint32_t>& pixels,
                                      std::uint16_t scrollX,
                                      std::uint16_t scrollY,
                                      std::vector<std::uint8_t>* colorCalculationFlags) {
+    const auto windowControl = vdp2Register(layer < 2U ? 0x0D0U : 0x0D2U);
+    const bool windowsEnabled = (windowControl & (0x000AU << ((layer & 1U) * 8U))) != 0U;
     const auto shift = layer == 0U ? 0U : 10U;
     const auto colorShift = layer == 0U ? 4U : 12U;
     const auto bitmapEnable = static_cast<std::uint16_t>(1U << (layer == 0U ? 1U : 9U));
@@ -1916,7 +1931,7 @@ void VideoRuntime::composeVdp2Bitmap(std::vector<std::uint32_t>& pixels,
             } else {
                 color = addVdp2Transparency(vdp2VramWord(offset));
             }
-            if (color != 0U && vdp2WindowAllows(layer, x, y)) {
+            if (color != 0U && (!windowsEnabled || vdp2WindowAllows(layer, x, y))) {
                 const auto outputIndex = static_cast<std::size_t>(y) * kFrameWidth + x;
                 pixels[outputIndex] = color;
                 if (colorCalculationFlags != nullptr && specialMode != 0U) {
@@ -1944,6 +1959,8 @@ void VideoRuntime::composeVdp2Cell(std::vector<std::uint32_t>& pixels, unsigned 
                                    std::uint16_t scrollX, std::uint16_t scrollY,
                                    std::vector<VideoCellSample>* samples,
                                    std::vector<std::uint8_t>* colorCalculationFlags) {
+    const auto windowControl = vdp2Register(layer < 2U ? 0x0D0U : 0x0D2U);
+    const bool windowsEnabled = (windowControl & (0x000AU << ((layer & 1U) * 8U))) != 0U;
     const auto colors = layer == 0U ? (characterControl >> 4U) & 0x7U
         : layer == 1U ? (characterControl >> 12U) & 0x3U
         : layer == 2U ? (characterControl >> 1U) & 0x1U
@@ -2010,6 +2027,8 @@ void VideoRuntime::composeVdp2Cell(std::vector<std::uint32_t>& pixels, unsigned 
     const auto charHeight = doubleCell ? 16U : 8U;
     const auto charShift = doubleCell ? 4U : 3U;
     const auto traceReads = mapReadTraceEnabled_ && layer == 0U;
+    const bool packed4BitSpans = colors == 0U && !windowsEnabled &&
+        samples == nullptr && !traceReads;
     VideoMapReadRecord readRecord{};
     if (traceReads) {
         readRecord.frame = frameCount_;
@@ -2047,6 +2066,12 @@ void VideoRuntime::composeVdp2Cell(std::vector<std::uint32_t>& pixels, unsigned 
         const auto pageY = (sourceY & (planeHeight - 1U)) >> 9U;
         const auto localY = sourceY & 0x1FFU;
         const auto patternY = localY >> charShift;
+        // VRAM cannot change during this synchronous composition. A pattern
+        // name is shared by the next 8/16 dots, but diagnostic reads retain
+        // their original per-dot accounting below.
+        auto cachedPntAddress = static_cast<std::size_t>(-1);
+        std::uint16_t upper{}, lower{};
+        unsigned palette{}, character{}, flip{};
         for (std::uint32_t x = 0; x < kFrameWidth; ++x) {
             const auto sourceX = (static_cast<std::size_t>(x) + (scrollX & 0x07FFU)) & (screenWidth - 1U);
             const auto planeX = static_cast<unsigned>(sourceX >> planeWidthShift);
@@ -2057,33 +2082,32 @@ void VideoRuntime::composeVdp2Cell(std::vector<std::uint32_t>& pixels, unsigned 
             const auto patternX = localX >> charShift;
             const auto pntAddress = planeAddresses[plane] + pageIndex * pageBytes +
                 ((patternY << (9U - charShift)) + patternX) * pntEntryBytes;
-            const auto upper = vdp2VramWord(pntAddress);
-            recordRendererWord(pntAddress, upper);
-            const auto lower = oneWord ? std::uint16_t{0}
-                                       : vdp2VramWord(pntAddress + 2U);
-            if (!oneWord) recordRendererWord(pntAddress + 2U, lower);
-            unsigned palette = 0U;
-            unsigned character = 0U;
-            unsigned flip = 0U;
-            if (oneWord) {
-                palette = colors == 0U
-                    ? static_cast<unsigned>((upper >> 12U) & 0xFU) | (auxPalette << 4U)
-                    : static_cast<unsigned>((upper >> 8U) & 0x70U);
-                flip = auxMode ? 0U : static_cast<unsigned>((upper >> 10U) & 3U);
-                character = static_cast<unsigned>(upper & (auxMode ? 0x0FFFU : 0x03FFU));
-                if (doubleCell) {
-                    character = (character << 2U) | (auxCharacter & 3U) |
-                        ((auxCharacter & (auxMode ? 0x10U : 0x1CU)) << 10U);
+            if (pntAddress != cachedPntAddress) {
+                cachedPntAddress = pntAddress;
+                upper = vdp2VramWord(pntAddress);
+                lower = oneWord ? std::uint16_t{0} : vdp2VramWord(pntAddress + 2U);
+                if (oneWord) {
+                    palette = colors == 0U
+                        ? static_cast<unsigned>((upper >> 12U) & 0xFU) | (auxPalette << 4U)
+                        : static_cast<unsigned>((upper >> 8U) & 0x70U);
+                    flip = auxMode ? 0U : static_cast<unsigned>((upper >> 10U) & 3U);
+                    character = static_cast<unsigned>(upper & (auxMode ? 0x0FFFU : 0x03FFU));
+                    if (doubleCell) {
+                        character = (character << 2U) | (auxCharacter & 3U) |
+                            ((auxCharacter & (auxMode ? 0x10U : 0x1CU)) << 10U);
+                    } else {
+                        character |= (auxCharacter & (auxMode ? 0x1CU : 0x1FU)) << 10U;
+                    }
                 } else {
-                    character |= (auxCharacter & (auxMode ? 0x1CU : 0x1FU)) << 10U;
+                    // In the two-word form the upper word carries palette bits
+                    // 6..0; the lower word carries the 15-bit character number.
+                    palette = static_cast<unsigned>(upper & (colors == 0U ? 0x007FU : 0x0070U));
+                    character = static_cast<unsigned>(lower & 0x7FFFU);
+                    flip = static_cast<unsigned>((upper >> 14U) & 3U);
                 }
-            } else {
-                // In the two-word form the upper word carries palette bits
-                // 6..0; the lower word carries the 15-bit character number.
-                palette = static_cast<unsigned>(upper & (colors == 0U ? 0x007FU : 0x0070U));
-                character = static_cast<unsigned>(lower & 0x7FFFU);
-                flip = static_cast<unsigned>((upper >> 14U) & 3U);
             }
+            recordRendererWord(pntAddress, upper);
+            if (!oneWord) recordRendererWord(pntAddress + 2U, lower);
             const auto inCharX = (flip & 1U) != 0U
                 ? charWidth - 1U - (localX & (charWidth - 1U)) : localX & (charWidth - 1U);
             const auto inCharY = (flip & 2U) != 0U
@@ -2099,6 +2123,41 @@ void VideoRuntime::composeVdp2Cell(std::vector<std::uint32_t>& pixels, unsigned 
                 0x20U + cellIndex * cellBytes;
             const auto rowAddress = patternAddress +
                 (static_cast<std::size_t>(dotY) * 8U + dotX) * bitsPerPixel / 8U;
+            if (packed4BitSpans) {
+                // Stop at the next 8-dot boundary, including inside a 16x16
+                // character. Horizontal flip reverses dots within this cell;
+                // the next span recomputes the flipped subcell normally.
+                const auto span = std::min<std::uint32_t>(
+                    8U - static_cast<unsigned>(localX & 7U), kFrameWidth - x);
+                const auto rowBase = patternAddress + static_cast<std::size_t>(dotY) * 4U;
+                const auto packed = (static_cast<std::uint32_t>(vdp2VramWord(rowBase)) << 16U) |
+                    vdp2VramWord(rowBase + 2U);
+                const auto paletteBase = colorOffset + (palette << 4U);
+                const auto outputBase = static_cast<std::size_t>(y) * kFrameWidth + x;
+                const auto patternSpecialColorCalculation = oneWord
+                    ? (patternControl & 0x0100U) != 0U : (upper & 0x1000U) != 0U;
+                for (std::uint32_t n = 0U; n < span; ++n) {
+                    const auto sourceDot = (flip & 1U) != 0U ? dotX - n : dotX + n;
+                    const auto index = (packed >> ((7U - sourceDot) * 4U)) & 0xFU;
+                    if (transparentDots && index == 0U) continue;
+                    const auto rawColorData = vdp2CramWord(
+                        static_cast<std::size_t>(paletteBase + index) * 2U);
+                    pixels[outputBase + n] = rgb555ToArgb(rawColorData);
+                    if (colorCalculationFlags != nullptr && specialMode != 0U) {
+                        // This path is always palette format; retain the same
+                        // special-function policy as the generic pixel path.
+                        const auto specialEnabled = specialMode == 1U
+                            ? patternSpecialColorCalculation
+                            : specialMode == 2U
+                                ? patternSpecialColorCalculation && vdp2SpecialColorCodeMatches(
+                                    specialFunctionSelect, specialFunctionCodes, layer, index)
+                                : (rawColorData & 0x8000U) != 0U;
+                        (*colorCalculationFlags)[outputBase + n] = specialEnabled ? 1U : 0U;
+                    }
+                }
+                x += span - 1U;
+                continue;
+            }
             std::uint32_t color = 0U;
             std::size_t cramAddress = kVdp2CramSize;
             std::uint16_t rawColorData{};
@@ -2140,9 +2199,9 @@ void VideoRuntime::composeVdp2Cell(std::vector<std::uint32_t>& pixels, unsigned 
                     pntAddress, rowAddress, cramAddress, upper,
                     static_cast<std::uint16_t>(lower), vdp2VramWord(rowAddress & ~1U),
                     cramAddress == kVdp2CramSize ? std::uint16_t{} : vdp2CramWord(cramAddress),
-                    vdp2WindowAllows(layer, x, y)});
+                    !windowsEnabled || vdp2WindowAllows(layer, x, y)});
             }
-            if (color != 0U && vdp2WindowAllows(layer, x, y)) {
+            if (color != 0U && (!windowsEnabled || vdp2WindowAllows(layer, x, y))) {
                 const auto outputIndex = static_cast<std::size_t>(y) * kFrameWidth + x;
                 pixels[outputIndex] = color;
                 if (colorCalculationFlags != nullptr && specialMode != 0U) {
@@ -2431,12 +2490,19 @@ void VideoRuntime::drawVdp1Command(std::size_t offset, std::uint16_t control) {
                 static_cast<std::uint32_t>(sourceWidth), static_cast<std::uint32_t>(sourceHeight), 0U};
             primitive.shades = {shades[0], shades[1], shades[2], shades[3]};
             if (queueVdp1Primitive(primitive)) return;
+            // Clipping bounds the visible span to kFrameWidth even when x
+            // starts far inside a large sprite. Reuse its scaled columns on
+            // every row instead of doing integer division for each pixel.
+            std::array<int, kFrameWidth> sourceColumns;
+            for (int x = minX; x < maxX; ++x) {
+                const auto sourceX = x * sourceWidth / width;
+                sourceColumns[x - minX] = flipX ? sourceWidth - sourceX - 1 : sourceX;
+            }
             for (int y = minY; y < maxY; ++y) {
+                const auto sourceY = y * sourceHeight / height;
+                const auto sy = flipY ? sourceHeight - sourceY - 1 : sourceY;
                 for (int x = minX; x < maxX; ++x) {
-                    const auto sourceX = x * sourceWidth / width;
-                    const auto sourceY = y * sourceHeight / height;
-                    const auto sx = flipX ? sourceWidth - sourceX - 1 : sourceX;
-                    const auto sy = flipY ? sourceHeight - sourceY - 1 : sourceY;
+                    const auto sx = sourceColumns[x - minX];
                     plotVdp1Pixel(left + x, top + y,
                         sampleVdp1Texture(source, sourceWidth, sourceHeight, sx, sy,
                                           pmod, color), pmod,

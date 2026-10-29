@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <utility>
 
 namespace {
 using namespace saturn;
@@ -41,6 +42,58 @@ void preservesPagedWordAccess() {
         REQUIRE(state.read32BE(address) == 0U);
         REQUIRE(state.memory().empty());
     }
+}
+
+void rawPageReadCacheTracksMemoryOwnershipAndAliases() {
+    constexpr core::Address missing = 0x00010020U;
+    constexpr core::Address collidingPage = 0x00410020U; // page keys 1 and 65 share a cache slot
+    sir::MachineState state;
+
+    // A cached missing-page result must not hide a later allocation.
+    REQUIRE(state.readRaw8(missing) == 0U);
+    REQUIRE(state.read16BE(missing) == 0U);
+    REQUIRE(state.read32BE(missing) == 0U);
+    state.write32BE(missing, 0x12345678U);
+    REQUIRE(state.read32BE(missing) == 0x12345678U);
+
+    // Direct-map collisions must replace the tag without returning the other page.
+    state.write32BE(collidingPage, 0xA1B2C3D4U);
+    REQUIRE(state.read32BE(missing) == 0x12345678U);
+    REQUIRE(state.read32BE(collidingPage) == 0xA1B2C3D4U);
+    REQUIRE(state.readRaw8(missing) == 0x12U);
+
+    // Reads crossing a 64 KiB backing-page boundary use both live pages.
+    state.write32BE(0x0000FFFEU, 0x89ABCDEFU);
+    REQUIRE(state.read32BE(0x0000FFFEU) == 0x89ABCDEFU);
+    REQUIRE(state.read16BE(0x0000FFFFU) == 0xABCDU);
+
+    // Cache entries are never copied as pointers into another MachineState.
+    static_cast<void>(state.read32BE(missing));
+    sir::MachineState copied = state;
+    copied.write32BE(missing, 0x01020304U);
+    REQUIRE(state.read32BE(missing) == 0x12345678U);
+    REQUIRE(copied.read32BE(missing) == 0x01020304U);
+
+    sir::MachineState assigned;
+    static_cast<void>(assigned.read32BE(missing));
+    assigned = state;
+    state.write32BE(missing, 0x55667788U);
+    REQUIRE(assigned.read32BE(missing) == 0x12345678U);
+    REQUIRE(state.read32BE(missing) == 0x55667788U);
+
+    sir::MachineState moved = std::move(assigned);
+    REQUIRE(moved.read32BE(missing) == 0x12345678U);
+    sir::MachineState moveAssigned;
+    moveAssigned = std::move(moved);
+    REQUIRE(moveAssigned.read32BE(missing) == 0x12345678U);
+
+    // RAM aliases must be canonicalized before consulting the cache tag.
+    platform::MmioInterceptor mmio;
+    sir::MachineState aliased;
+    aliased.setMemoryInterceptor(&mmio);
+    aliased.write32BE(0x26000040U, 0xDEADBEEFU);
+    REQUIRE(aliased.read32BE(0x06000040U) == 0xDEADBEEFU);
+    REQUIRE(aliased.read32BE(0x26000040U) == 0xDEADBEEFU);
 }
 
 void preservesDenseStateVisibility() {
@@ -102,6 +155,63 @@ void preservesDenseStateVisibility() {
     REQUIRE(actual == expected);
     REQUIRE(nativeProbe.values == std::vector<std::uint32_t>({123U, 456U, 0U}));
     REQUIRE(nativeProbe.values == referenceProbe.values);
+}
+
+void jitCacheTracksBlockRevision() {
+    if (!sir::Win64JitBlockExecutor::available()) return;
+    sir::Module module;
+    auto& block = module.createBlock(0x180U);
+    sir::ModuleBuilder builder(module);
+    builder.setInsertPoint(block);
+    builder.ret(builder.constI32(7U));
+    block.markLowered();
+
+    sir::Win64JitBlockExecutor jit;
+    sir::MachineState state;
+    auto result = jit.execute(block, state);
+    REQUIRE(result.has_value());
+    REQUIRE(result->dynamicTarget == 7U);
+    REQUIRE(jit.compiledBlockCount() == 1U);
+
+    // A stable revision executes through the existing compiled entry.
+    result = jit.execute(block, state);
+    REQUIRE(result.has_value());
+    REQUIRE(result->dynamicTarget == 7U);
+    REQUIRE(jit.compiledBlockCount() == 1U);
+
+    REQUIRE(module.resetBlockAt(block.address()) == &block);
+    builder.setInsertPoint(block);
+    builder.ret(builder.constI32(9U));
+    block.markLowered();
+    result = jit.execute(block, state);
+    REQUIRE(result.has_value());
+    REQUIRE(result->dynamicTarget == 9U);
+    REQUIRE(jit.compiledBlockCount() == 1U);
+}
+
+void jitUnsupportedCacheTracksBlockRevision() {
+    if (!sir::Win64JitBlockExecutor::available()) return;
+    sir::Module module;
+    auto& block = module.createBlock(0x1C0U);
+    sir::ModuleBuilder builder(module);
+    builder.setInsertPoint(block);
+    const auto value = builder.constI32(11U);
+    block.markLowered(); // An unfinished body is a stable unsupported entry.
+
+    sir::Win64JitBlockExecutor jit;
+    sir::MachineState state;
+    REQUIRE(!jit.execute(block, state).has_value());
+    REQUIRE(!jit.execute(block, state).has_value());
+    REQUIRE(jit.compiledBlockCount() == 0U);
+
+    // Appending the terminator changes the revision and must invalidate the
+    // cached unsupported result so the block can now be compiled.
+    builder.ret(value);
+    block.markLowered();
+    const auto result = jit.execute(block, state);
+    REQUIRE(result.has_value());
+    REQUIRE(result->dynamicTarget == 11U);
+    REQUIRE(jit.compiledBlockCount() == 1U);
 }
 
 void flaggedArithmeticAndDivision() {
@@ -548,8 +658,13 @@ void chainStopsOnBoundaryFailure() {
 void registerWin64JitTests(test::Registry& registry) {
     registry.add("sir: word RAM accesses preserve page boundaries and snapshots",
                  preservesPagedWordAccess);
+    registry.add("sir: raw page cache tracks ownership, misses and aliases",
+                 rawPageReadCacheTracksMemoryOwnershipAndAliases);
     registry.add("sir: dense native state remains visible to MMIO and snapshots",
                  preservesDenseStateVisibility);
+    registry.add("sir: Win64 JIT cache follows block revisions", jitCacheTracksBlockRevision);
+    registry.add("sir: Win64 JIT unsupported cache follows block revisions",
+                 jitUnsupportedCacheTracksBlockRevision);
     registry.add("sir: Win64 JIT flagged arithmetic and DIV1", flaggedArithmeticAndDivision);
     registry.add("sir: Win64 JIT chains direct blocks", chainsDirectBlocks);
     registry.add("sir: Win64 JIT chain preserves boundaries and fallback", preservesBoundariesAndFallback);

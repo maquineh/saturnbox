@@ -1,6 +1,6 @@
 param(
     [string]$DiscImage = 'H:/Isos/Rockman X4 (J)(Saturn)(ISO).mdf',
-    [string]$Renderer = 'cpu',
+    [string]$Renderer = 'auto',
     [long]$VBlankBlocks = 14000,
     [string]$SessionDirectory,
     [switch]$ScspDriver

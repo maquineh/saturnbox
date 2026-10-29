@@ -144,6 +144,10 @@ bool MmioInterceptor::isMmio(AddressSpace space) noexcept {
 
 std::optional<std::uint32_t> MmioInterceptor::read(core::Address address,
                                                     std::uint8_t width) {
+    // Ordinary work RAM is the overwhelmingly common bus access. Let the
+    // backing store handle it before checking the individual device decoders.
+    const auto ramWindow = address & 0xFFF00000U;
+    if (ramWindow == 0x06000000U || ramWindow == 0x00200000U) return std::nullopt;
     if (isSh2FrtRegister(address, width)) {
         std::uint32_t value{};
         for (std::uint8_t offset = 0U; offset < width; ++offset) {
@@ -266,6 +270,8 @@ std::optional<std::uint32_t> MmioInterceptor::read(core::Address address,
 
 bool MmioInterceptor::write(core::Address address, std::uint8_t width,
                             std::uint32_t value) {
+    const auto ramWindow = address & 0xFFF00000U;
+    if (ramWindow == 0x06000000U || ramWindow == 0x00200000U) return false;
     if ((address == 0x01000000U || address == 0x21000000U) && width == 2U) {
         slaveInputCapture_ = true;
         return true;

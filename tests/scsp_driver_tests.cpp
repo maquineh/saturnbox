@@ -2,6 +2,7 @@
 #include "saturn/saturn/mmio.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <vector>
 
@@ -147,11 +148,8 @@ void invalidResetVectorsFailWithoutAcknowledgingCommands() {
     REQUIRE(sound.stats().driverResets == 1U);
 }
 
-void realDriverWritesSlotsAndProducesPcm() {
+void loadLoopingPcmDriver(saturn::platform::ScspRuntime& sound) {
     using Sound = saturn::platform::ScspRuntime;
-    saturn::platform::MmioInterceptor mmio;
-    auto& sound = mmio.scsp();
-    REQUIRE(sound.enableDriverCpu());
     const auto writeRam = [&](std::uint32_t offset, unsigned width, std::uint32_t value) {
         REQUIRE(sound.write(Sound::kRamBase + offset, static_cast<std::uint8_t>(width), value));
     };
@@ -177,6 +175,90 @@ void realDriverWritesSlotsAndProducesPcm() {
         writeRam(static_cast<std::uint32_t>(0x100U + index * 2U), 2, code[index]);
     for (unsigned index = 0; index < 8U; ++index)
         writeRam(0x2000U + index, 1, (index & 1U) != 0U ? 0x40U : 0xC0U);
+}
+
+void realtimeDeviceKeepsDriverOnTheGuestBlockClock() {
+    using Sound = saturn::platform::ScspRuntime;
+    struct Checkpoint {
+        Sound::Stats stats;
+        std::array<std::uint32_t, 12> slot;
+    };
+    struct Run {
+        std::vector<Checkpoint> checkpoints;
+        std::vector<float> pcm;
+    };
+    const auto execute = [](bool realtime) {
+        // This local owns the only active Musashi instance. It is destroyed
+        // before execute is called again for the other frontend clock mode.
+        Sound sound;
+        REQUIRE(sound.enableDriverCpu());
+        loadLoopingPcmDriver(sound);
+        sound.setAudioFrameBlocks(7350U); // Ten SH-2 steps per audio sample.
+        sound.setRealtimeAudioClock(realtime);
+        sound.setSoundCpuEnabled(true);
+        Run run;
+        const auto checkpoint = [&] {
+            Checkpoint value{sound.stats(), {}};
+            for (std::size_t word = 0U; word < value.slot.size(); ++word)
+                value.slot[word] = sound.read(Sound::kRegistersBase +
+                    static_cast<std::uint32_t>(word * 2U), 2U).value();
+            run.checkpoints.push_back(std::move(value));
+        };
+        for (unsigned frameIndex = 0U; frameIndex < 2U; ++frameIndex) {
+            for (unsigned ticks : {100U, 777U, 2100U}) {
+                for (unsigned tick = 0U; tick < ticks; ++tick) sound.onBlockTick();
+                REQUIRE(sound.stats().driverCycles > 0U);
+                REQUIRE(sound.stats().audioSubFrameSamples > 0U);
+                REQUIRE((sound.read(Sound::kRegistersBase, 2U).value() & 0x0800U) != 0U);
+                Sound::AudioFrame pending;
+                REQUIRE(!sound.consumeAudio(pending));
+                checkpoint();
+            }
+            sound.onVBlank(); // Fill the remainder of the same 735-sample budget.
+            checkpoint();
+            Sound::AudioFrame frame;
+            REQUIRE(sound.consumeAudio(frame));
+            REQUIRE(frame.sampleRate == 44100U);
+            REQUIRE(frame.channels == 2U);
+            REQUIRE(frame.samples.size() == 735U * 2U);
+            REQUIRE(sound.stats().audioSamples == (frameIndex + 1U) * 735U);
+            REQUIRE(sound.stats().activeVoices == 1U);
+            REQUIRE(sound.stats().slotMask == 1U);
+            run.pcm.insert(run.pcm.end(), frame.samples.begin(), frame.samples.end());
+        }
+        return run;
+    };
+    const auto headless = execute(false);
+    const auto device = execute(true);
+    REQUIRE(headless.checkpoints.size() == device.checkpoints.size());
+    for (std::size_t index = 0U; index < headless.checkpoints.size(); ++index) {
+        const auto& a = headless.checkpoints[index];
+        const auto& b = device.checkpoints[index];
+        REQUIRE(a.stats.driverCycles == b.stats.driverCycles);
+        REQUIRE(a.stats.driverPc == b.stats.driverPc);
+        REQUIRE(a.stats.driverResets == b.stats.driverResets);
+        REQUIRE(a.stats.driverRegisterWrites == b.stats.driverRegisterWrites);
+        REQUIRE(a.stats.activeVoices == b.stats.activeVoices);
+        REQUIRE(a.stats.slotMask == b.stats.slotMask);
+        REQUIRE(a.stats.slotKeyOns == b.stats.slotKeyOns);
+        REQUIRE(a.stats.audioBlockTicks == b.stats.audioBlockTicks);
+        REQUIRE(a.stats.audioSubFrameSamples == b.stats.audioSubFrameSamples);
+        REQUIRE(a.stats.audioFrames == b.stats.audioFrames);
+        REQUIRE(a.stats.audioSamples == b.stats.audioSamples);
+        REQUIRE(a.slot == b.slot);
+    }
+    REQUIRE(headless.pcm == device.pcm);
+    REQUIRE(std::count_if(device.pcm.begin(), device.pcm.end(), [](float sample) {
+        return std::abs(sample) > 0.01F;
+    }) > 100);
+}
+
+void realDriverWritesSlotsAndProducesPcm() {
+    using Sound = saturn::platform::ScspRuntime;
+    saturn::platform::MmioInterceptor mmio;
+    auto& sound = mmio.scsp();
+    REQUIRE(sound.enableDriverCpu());
+    loadLoopingPcmDriver(sound);
     REQUIRE(sound.write(Sound::kCommandStatus, 1, 0x80U));
     saturn::sir::MachineState state;
     sound.onSchedulerTick(state);
@@ -216,5 +298,7 @@ void registerScspDriverTests(test::Registry& registry) {
     registry.add("SCSP: sound CPU advances in sub-sample chunks", soundCpuAdvancesInSubSampleChunks);
     registry.add("SCSP: invalid reset vectors report an error and can recover", invalidResetVectorsFailWithoutAcknowledgingCommands);
     registry.add("SCSP: real 68000 configures slots and emits PCM", realDriverWritesSlotsAndProducesPcm);
+    registry.add("SCSP: realtime device preserves the real driver block clock",
+                 realtimeDeviceKeepsDriverOnTheGuestBlockClock);
 #endif
 }

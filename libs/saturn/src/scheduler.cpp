@@ -2,8 +2,29 @@
 
 #include <algorithm>
 #include <bit>
+#include <chrono>
 
 namespace saturn::platform {
+namespace {
+
+using ProfileClock = std::chrono::steady_clock;
+
+[[nodiscard]] bool shouldSample(ScuEventScheduler::Stats::TimingProfile& profile) noexcept {
+    ++profile.calls;
+    return profile.calls % ScuEventScheduler::kProfileSampleInterval == 0U;
+}
+
+void recordSample(ScuEventScheduler::Stats::TimingProfile& profile,
+                  ProfileClock::time_point start) noexcept {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        ProfileClock::now() - start).count();
+    profile.sampledNanoseconds += static_cast<std::uint64_t>(std::max<std::int64_t>(0, elapsed));
+    ++profile.sampledCalls;
+    profile.estimatedNanoseconds =
+        (profile.sampledNanoseconds / profile.sampledCalls) * profile.calls;
+}
+
+} // namespace
 
 ScuEventScheduler::ScuEventScheduler(std::size_t vblankPeriodBlocks) noexcept
     : vblankPeriodBlocks_(vblankPeriodBlocks),
@@ -22,6 +43,16 @@ void ScuEventScheduler::setVBlankPeriod(std::size_t periodBlocks) noexcept {
         std::max<std::size_t>(1U, periodBlocks * 4U / 5U);
     cdSubcodeCounter_ = 0U;
     reportedMasked_ = false;
+}
+
+void ScuEventScheduler::setProfilingEnabled(bool enabled) noexcept {
+    if (profilingEnabled_ == enabled) return;
+    profilingEnabled_ = enabled;
+    stats_.scspBlockTick = {};
+    stats_.scspSchedulerTick = {};
+    stats_.mmioSchedulerTick = {};
+    stats_.scspVBlank = {};
+    stats_.videoVBlankOut = {};
 }
 
 std::size_t ScuEventScheduler::vblankPeriod() const noexcept {
@@ -44,7 +75,15 @@ std::optional<sir::InterruptRequest> ScuEventScheduler::beforeBlock(
         mmio.raiseScuInterrupt(kVBlankInStatus);
         // The IN handler may request VBE erase/change during this blank.
         // Finish it at OUT, before the guest clears VBE in its OUT handler.
-        mmio.scsp().onVBlank();
+        if (profilingEnabled_) {
+            auto& profile = stats_.scspVBlank;
+            ++profile.calls;
+            const auto start = ProfileClock::now();
+            mmio.scsp().onVBlank();
+            recordSample(profile, start);
+        } else {
+            mmio.scsp().onVBlank();
+        }
         mmio.video().onVBlankIn();
         scanlineCounter_ = 0U;
         // Explicit events (period zero) still need an OUT edge. Artificial
@@ -55,7 +94,15 @@ std::optional<sir::InterruptRequest> ScuEventScheduler::beforeBlock(
         ++stats_.vblankEvents;
     };
     const auto raiseVblankOut = [&] {
-        mmio.video().onVBlankOut();
+        if (profilingEnabled_) {
+            auto& profile = stats_.videoVBlankOut;
+            ++profile.calls;
+            const auto start = ProfileClock::now();
+            mmio.video().onVBlankOut();
+            recordSample(profile, start);
+        } else {
+            mmio.video().onVBlankOut();
+        }
         mmio.scuDma().onActivationFactor(
             ScuDmaRuntime::ActivationFactor::VBlankOut);
         mmio.raiseScuInterrupt(kVBlankOutStatus);
@@ -102,7 +149,18 @@ std::optional<sir::InterruptRequest> ScuEventScheduler::beforeBlock(
         // execution and SH-2 register writes interleave inside a frame
         // instead of only at the frame boundary.
         mmio.scsp().setAudioFrameBlocks(vblankPeriodBlocks_);
-        mmio.scsp().onBlockTick();
+        if (profilingEnabled_) {
+            auto& profile = stats_.scspBlockTick;
+            if (shouldSample(profile)) {
+                const auto start = ProfileClock::now();
+                mmio.scsp().onBlockTick();
+                recordSample(profile, start);
+            } else {
+                mmio.scsp().onBlockTick();
+            }
+        } else {
+            mmio.scsp().onBlockTick();
+        }
         if (vblankPeriodBlocks_ != 0U && ++periodCounter_ >= vblankPeriodBlocks_) {
             periodCounter_ = 0U;
             raiseVblank();
@@ -137,8 +195,27 @@ std::optional<sir::InterruptRequest> ScuEventScheduler::beforeBlock(
     // The 68K-side SCSP producer is modeled as a deterministic mailbox
     // service. It runs after the preceding block has had a chance to publish
     // its request words and before the next block observes the ready flags.
-    mmio.scsp().onSchedulerTick(state);
-    mmio.onSchedulerTick(state);
+    if (profilingEnabled_) {
+        auto& scspProfile = stats_.scspSchedulerTick;
+        if (shouldSample(scspProfile)) {
+            const auto start = ProfileClock::now();
+            mmio.scsp().onSchedulerTick(state);
+            recordSample(scspProfile, start);
+        } else {
+            mmio.scsp().onSchedulerTick(state);
+        }
+        auto& mmioProfile = stats_.mmioSchedulerTick;
+        if (shouldSample(mmioProfile)) {
+            const auto start = ProfileClock::now();
+            mmio.onSchedulerTick(state);
+            recordSample(mmioProfile, start);
+        } else {
+            mmio.onSchedulerTick(state);
+        }
+    } else {
+        mmio.scsp().onSchedulerTick(state);
+        mmio.onSchedulerTick(state);
+    }
 
     // The HLE renderer completes a PTMR=1 manual list synchronously and a
     // PTMR=2 automatic list at VBlank-OUT above. In both cases the SCU draw-end

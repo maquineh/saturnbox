@@ -105,8 +105,27 @@ std::uint32_t* MachineState::nativeStateData() noexcept {
 
 std::uint8_t MachineState::readRaw8(core::Address address) const noexcept {
     address = backingAddress(address);
-    const auto found = memoryPages_.find(address >> 16U);
-    return found == memoryPages_.end() ? 0U : found->second[address & 0xFFFFU];
+    const auto* bytes = rawPageData(address >> 16U);
+    return bytes ? (*bytes)[address & 0xFFFFU] : 0U;
+}
+
+const std::vector<std::uint8_t>* MachineState::rawPageData(
+    core::Address pageKey) const noexcept {
+    auto& entry = rawPageReadCache_.entries[pageKey & (RawPageReadCache::kEntryCount - 1U)];
+    if (entry.valid && entry.pageKey == pageKey) return entry.bytes;
+    const auto found = memoryPages_.find(pageKey);
+    entry.pageKey = pageKey;
+    entry.bytes = found == memoryPages_.end() ? nullptr : &found->second;
+    entry.valid = true;
+    return entry.bytes;
+}
+
+void MachineState::cacheRawPage(core::Address pageKey,
+                                const std::vector<std::uint8_t>* bytes) const noexcept {
+    auto& entry = rawPageReadCache_.entries[pageKey & (RawPageReadCache::kEntryCount - 1U)];
+    entry.pageKey = pageKey;
+    entry.bytes = bytes;
+    entry.valid = true;
 }
 
 void MachineState::writeRaw8(core::Address address, std::uint8_t value) {
@@ -115,6 +134,7 @@ void MachineState::writeRaw8(core::Address address, std::uint8_t value) {
     if (page == memoryPages_.end()) {
         if (value == 0U) return;
         page = memoryPages_.emplace(address >> 16U, std::vector<std::uint8_t>(0x10000U)).first;
+        cacheRawPage(address >> 16U, &page->second);
     }
     auto& byte = page->second[address & 0xFFFFU];
     if (byte == value) return;
@@ -141,10 +161,9 @@ std::uint16_t MachineState::read16BE(core::Address address) const {
     address = backingAddress(address);
     const auto offset = address & 0xFFFFU;
     if (offset <= 0xFFFEU) {
-        const auto page = memoryPages_.find(address >> 16U);
-        if (page == memoryPages_.end()) return 0U;
-        const auto& bytes = page->second;
-        return static_cast<std::uint16_t>((bytes[offset] << 8U) | bytes[offset + 1U]);
+        const auto* bytes = rawPageData(address >> 16U);
+        if (!bytes) return 0U;
+        return static_cast<std::uint16_t>(((*bytes)[offset] << 8U) | (*bytes)[offset + 1U]);
     }
     return static_cast<std::uint16_t>((static_cast<std::uint16_t>(readRaw8(address)) << 8U) |
                                       readRaw8(static_cast<core::Address>(address + 1U)));
@@ -159,13 +178,12 @@ std::uint32_t MachineState::read32BE(core::Address address) const {
     address = backingAddress(address);
     const auto offset = address & 0xFFFFU;
     if (offset <= 0xFFFCU) {
-        const auto page = memoryPages_.find(address >> 16U);
-        if (page == memoryPages_.end()) return 0U;
-        const auto& bytes = page->second;
-        return (static_cast<std::uint32_t>(bytes[offset]) << 24U) |
-               (static_cast<std::uint32_t>(bytes[offset + 1U]) << 16U) |
-               (static_cast<std::uint32_t>(bytes[offset + 2U]) << 8U) |
-               bytes[offset + 3U];
+        const auto* bytes = rawPageData(address >> 16U);
+        if (!bytes) return 0U;
+        return (static_cast<std::uint32_t>((*bytes)[offset]) << 24U) |
+               (static_cast<std::uint32_t>((*bytes)[offset + 1U]) << 16U) |
+               (static_cast<std::uint32_t>((*bytes)[offset + 2U]) << 8U) |
+               (*bytes)[offset + 3U];
     }
     return (static_cast<std::uint32_t>(readRaw8(address)) << 24U) |
            (static_cast<std::uint32_t>(readRaw8(static_cast<core::Address>(address + 1U))) << 16U) |
@@ -206,6 +224,7 @@ void MachineState::writeRawWord(core::Address address, std::uint32_t value,
     if (page == memoryPages_.end()) {
         if (value == 0U) return;
         page = memoryPages_.emplace(address >> 16U, std::vector<std::uint8_t>(0x10000U)).first;
+        cacheRawPage(address >> 16U, &page->second);
     }
     auto lastGenerationPage = std::numeric_limits<core::Address>::max();
     for (std::uint8_t byte = 0U; byte < width; ++byte) {
@@ -226,8 +245,13 @@ void MachineState::writeRawWord(core::Address address, std::uint32_t value,
 }
 
 void MachineState::noteMemoryWrite(core::Address address) {
+    ++memoryWriteEpoch_;
     const auto page = static_cast<core::Address>(address >> kMemoryGenerationPageShift);
     ++memoryPageWriteGenerations_[page];
+}
+
+std::uint64_t MachineState::memoryWriteEpoch() const noexcept {
+    return memoryWriteEpoch_;
 }
 
 std::uint64_t MachineState::memoryWriteGeneration(
@@ -539,6 +563,7 @@ ProgramExecutionResult ProgramExecutor::run(BasicBlock* entry, MachineState& sta
         const BasicBlock* block{};
         std::uint64_t firstPageGeneration{};
         std::uint64_t lastPageGeneration{};
+        std::uint64_t writeEpoch{};
     };
     std::unordered_map<core::Address, CachedResolution> resolutionCache;
     resolutionCache.reserve(256U);
@@ -548,6 +573,13 @@ ProgramExecutionResult ProgramExecutor::run(BasicBlock* entry, MachineState& sta
              !known->instructions().empty())) {
             return known;
         }
+        const auto epoch = state.memoryWriteEpoch();
+        const auto cached = resolutionCache.find(address);
+        // Most boundary checks repeat without a RAM write. In that case no
+        // code page can have changed, including writes made by a block hook.
+        if (cached != resolutionCache.end() && cached->second.writeEpoch == epoch) {
+            return cached->second.block;
+        }
         const auto codeEndWide = static_cast<std::uint64_t>(address) +
                                  kMaximumCodeSnapshotBytes - 1U;
         const auto lastCodeAddress = static_cast<core::Address>(std::min(
@@ -555,10 +587,10 @@ ProgramExecutionResult ProgramExecutor::run(BasicBlock* entry, MachineState& sta
                 std::numeric_limits<core::Address>::max())));
         const auto firstPageGeneration = state.memoryWriteGeneration(address);
         const auto lastPageGeneration = state.memoryWriteGeneration(lastCodeAddress);
-        const auto cached = resolutionCache.find(address);
         if (cached != resolutionCache.end() &&
             cached->second.firstPageGeneration == firstPageGeneration &&
             cached->second.lastPageGeneration == lastPageGeneration) {
+            cached->second.writeEpoch = epoch;
             return cached->second.block;
         }
         const auto* resolved = options.resolveBlockAtStep
@@ -567,7 +599,7 @@ ProgramExecutionResult ProgramExecutor::run(BasicBlock* entry, MachineState& sta
         resolutionCache.insert_or_assign(address, CachedResolution{
             resolved,
             state.memoryWriteGeneration(address),
-            state.memoryWriteGeneration(lastCodeAddress)});
+            state.memoryWriteGeneration(lastCodeAddress), state.memoryWriteEpoch()});
         return resolved;
     };
 
@@ -595,6 +627,9 @@ ProgramExecutionResult ProgramExecutor::run(BasicBlock* entry, MachineState& sta
     constexpr core::Address kCallbackReturnSentinel = 0xFFFFFFFCU;
     const bool publishContext = options.interrupt || options.beforeBlock ||
                                  options.observeBlock || state.memoryInterceptor();
+    // MSVC's empty std::map owns an allocated sentinel. Reuse the context
+    // across boundaries rather than allocating/freeing one for every block.
+    ExecutionContext context;
     // Both engines use these same boundaries and control-flow transitions.
     // A native continuation may prepare a successor which needs interpreter
     // fallback; remember that boundary so its hooks are not repeated.
@@ -603,9 +638,10 @@ ProgramExecutionResult ProgramExecutor::run(BasicBlock* entry, MachineState& sta
             result.address = current->address();
             state.writeState(kProgramCounterStateSlot, current->address());
             if (publishContext) {
-                ExecutionContext context{current->address(),
-                                         previous ? previous->address() : 0U,
-                                         result.steps, {}};
+                context.blockAddress = current->address();
+                context.callerBlock = previous ? previous->address() : 0U;
+                context.step = result.steps;
+                context.state.clear();
                 if (state.memoryInterceptor() &&
                     state.memoryInterceptor()->requiresStateSnapshot(current->address())) {
                     context.state = state.stateSlots();
@@ -663,15 +699,19 @@ ProgramExecutionResult ProgramExecutor::run(BasicBlock* entry, MachineState& sta
                 }
             }
             if (options.beforeBlock) {
+                const auto hookWriteEpoch = state.memoryWriteEpoch();
+                const auto hookBlockRevision = current->revision();
                 options.beforeBlock(*current, state, result.steps);
-            }
-            if (options.refreshKnownBlocksOnWrite) {
-                const auto address = current->address();
-                current = resolve(current, address);
-                if (!current || current->instructions().empty()) {
-                    result.status = ProgramStatus::UnresolvedTarget;
-                    result.unresolvedTarget = address;
-                    return false;
+                if (options.refreshKnownBlocksOnWrite &&
+                    (state.memoryWriteEpoch() != hookWriteEpoch ||
+                     current->revision() != hookBlockRevision)) {
+                    const auto address = current->address();
+                    current = resolve(current, address);
+                    if (!current || current->instructions().empty()) {
+                        result.status = ProgramStatus::UnresolvedTarget;
+                        result.unresolvedTarget = address;
+                        return false;
+                    }
                 }
             }
             if (options.observeBlock) {

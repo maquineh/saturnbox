@@ -2352,6 +2352,158 @@ void composesVdp2CellPatternNameAndTile() {
     REQUIRE(frame.pixels[7] == 0xFFFF0000U);
 }
 
+void keepsVdp2CellCacheLocalAndTraceCountsPerDot() {
+    for (const bool oneWord : {false, true}) {
+        platform::VideoRuntime video;
+        const auto regs = platform::VideoRuntime::kVdp2Registers;
+        const auto vram = platform::VideoRuntime::kVdp2Base;
+        REQUIRE(video.write(regs, 2U, 0x8000U));
+        REQUIRE(video.write(regs + 0x20U, 2U, 1U));
+        REQUIRE(video.write(regs + 0x28U, 2U, 0x30U));
+        REQUIRE(video.write(regs + 0x30U, 2U, oneWord ? 0x8000U : 0U));
+        REQUIRE(video.write(regs + 0x40U, 2U, 1U));
+        REQUIRE(video.write(regs + 0x70U, 2U, 7U)); // Starts at the last dot of a tile.
+        const auto map = vram + (oneWord ? 0x2000U : 0x4000U);
+        REQUIRE(video.write(map + (oneWord ? 0U : 2U), 2U, 4U));
+        REQUIRE(video.write(map + (oneWord ? 2U : 6U), 2U, 8U));
+        for (unsigned dot = 0; dot < 64U; ++dot) {
+            REQUIRE(video.write(vram + 0x80U + dot * 2U, 2U, 0x801FU));
+            REQUIRE(video.write(vram + 0x100U + dot * 2U, 2U, 0x83E0U));
+        }
+        video.setMapReadTrace(true);
+        video.advanceFrame();
+        REQUIRE(video.lastFrame().pixels[0] == 0xFFFF0000U);
+        REQUIRE(video.lastFrame().pixels[1] == 0xFF00FF00U);
+        REQUIRE(video.lastFrame().pixels[320] == 0xFFFF0000U);
+        REQUIRE(video.mapReadTrace().back().rendererReads ==
+                video.lastFrame().pixels.size() * (oneWord ? 1U : 2U));
+        // No cache survives composition: changing the PNT must affect the next frame.
+        REQUIRE(video.write(map + (oneWord ? 2U : 6U), 2U, 4U));
+        video.advanceFrame();
+        REQUIRE(video.lastFrame().pixels[1] == 0xFFFF0000U);
+        // A transparent layer must not retain pixels from the scratch buffer.
+        REQUIRE(video.write(regs + 0x20U, 2U, 2U));
+        REQUIRE(video.write(regs + 0x28U, 2U, 0x3230U));
+        REQUIRE(video.write(regs + 0x3cU, 2U, 0x10U));
+        video.advanceFrame();
+        REQUIRE(video.lastFrame().pixels[0] == 0xFF000000U);
+    }
+}
+
+void matchesVdp2Packed4BitSpansToDiagnosticSamples() {
+    for (const bool oneWord : {false, true}) {
+        for (const bool large : {false, true}) {
+            for (unsigned flip = 0U; flip < 4U; ++flip) {
+                platform::VideoRuntime video;
+                const auto regs = platform::VideoRuntime::kVdp2Registers;
+                const auto vram = platform::VideoRuntime::kVdp2Base;
+                platform::VideoDiagnosticSnapshot snapshot;
+                bool captured{};
+                video.captureFirstReenabledBlackFrame([&](const auto& value) {
+                    snapshot = value;
+                    captured = true;
+                });
+                REQUIRE(video.write(regs, 2U, 0x8010U));
+                // Alternate transparent/opaque palette index zero as well.
+                REQUIRE(video.write(regs + 0x20U, 2U, (flip & 1U) ? 0x101U : 1U));
+                REQUIRE(video.write(regs + 0x28U, 2U, large ? 1U : 0U));
+                REQUIRE(video.write(regs + 0x30U, 2U,
+                    oneWord ? (large ? 0x8100U : 0x8000U) : 0U));
+                REQUIRE(video.write(regs + 0x40U, 2U, 0x0808U));
+                REQUIRE(video.write(regs + 0x42U, 2U, 0x0808U));
+                REQUIRE(video.write(regs + 0x70U, 2U, 7U));
+                REQUIRE(video.write(regs + 0x74U, 2U, 7U));
+                REQUIRE(video.write(regs + 0xe4U, 2U, 1U)); // CRAM offset 256.
+                REQUIRE(video.write(regs + 0xf8U, 2U, 1U));
+                const unsigned pageBytes = (oneWord ? 0x2000U : 0x4000U) / (large ? 4U : 1U);
+                const auto map = vram + 8U * pageBytes;
+                for (unsigned offset = 0U; offset < pageBytes; offset += oneWord ? 2U : 4U) {
+                    if (oneWord) {
+                        REQUIRE(video.write(map + offset, 2U,
+                            0x2000U | (flip << 10U) | (large ? 64U : 256U)));
+                    } else {
+                        const auto special = (offset & 4U) != 0U ? 0x1000U : 0U;
+                        REQUIRE(video.write(map + offset, 4U,
+                            ((2U | special | (flip << 14U)) << 16U) | 256U));
+                    }
+                }
+                // Four distinct 8x8 subcells, with spatially varying nibbles.
+                for (unsigned offset = 0U; offset < 128U; offset += 2U) {
+                    unsigned word{};
+                    for (unsigned n = 0U; n < 4U; ++n)
+                        word = (word << 4U) | (((offset * 2U + n) * 5U + offset / 8U) & 15U);
+                    REQUIRE(video.write(vram + 0x2000U + offset, 2U, word));
+                }
+                for (unsigned index = 0U; index < 16U; ++index) {
+                    REQUIRE(video.write(platform::VideoRuntime::kVdp2Cram +
+                        (256U + 32U + index) * 2U, 2U,
+                        ((index & 1U) != 0U ? 0xc000U : 0x4000U) |
+                        (index << 5U) | (15U - index)));
+                }
+                video.advanceFrame();
+                video.presentFrame();
+                const auto fastPixels = video.lastFrame().pixels;
+                REQUIRE(!captured);
+                // Enable real color calculation, then force the generic
+                // compositor with map tracing without changing image state.
+                REQUIRE(video.write(regs + 0xecU, 2U, 1U));
+                REQUIRE(video.write(regs + 0x108U, 2U, 15U));
+                REQUIRE(video.write(regs + 0x24U, 2U, flip & 1U));
+                REQUIRE(video.write(regs + 0x26U, 2U, 0x5aa5U));
+                for (unsigned mode = 0U; mode < 4U; ++mode) {
+                    REQUIRE(video.write(regs + 0xeeU, 2U, mode));
+                    video.setMapReadTrace(false);
+                    video.advanceFrame();
+                    const auto fastCalculated = video.lastFrame().pixels;
+                    if (mode == 0U) REQUIRE(fastCalculated != fastPixels);
+                    video.setMapReadTrace(true);
+                    video.advanceFrame();
+                    REQUIRE(video.lastFrame().pixels == fastCalculated);
+                    REQUIRE(video.mapReadTrace().back().rendererReads ==
+                        fastCalculated.size() * (oneWord ? 1U : 2U));
+                }
+                video.setMapReadTrace(false);
+                REQUIRE(video.write(regs + 0xecU, 2U, 0U));
+                REQUIRE(video.write(regs + 0xeeU, 2U, 0U));
+                // A priority-zero reenabled frame triggers the existing black
+                // probe while its NBG0 diagnostic still renders every sample.
+                REQUIRE(video.write(regs, 2U, 0U));
+                video.advanceFrame();
+                video.presentFrame();
+                REQUIRE(video.write(regs + 0xf8U, 2U, 0U));
+                REQUIRE(video.write(regs, 2U, 0x8010U));
+                video.advanceFrame();
+                video.presentFrame();
+                REQUIRE(captured);
+                REQUIRE(snapshot.cellSamples.size() == fastPixels.size());
+                REQUIRE(snapshot.nbg0.pixels == fastPixels);
+                REQUIRE(snapshot.cellSamples.front().windowAllows);
+            }
+        }
+    }
+}
+
+void capturesVdp2ZeroPriorityLayerBeforeSkippingItsMerge() {
+    platform::VideoRuntime video;
+    const auto regs = platform::VideoRuntime::kVdp2Registers;
+    REQUIRE(video.write(regs, 2U, 0x8000U));
+    REQUIRE(video.write(regs + 0x20U, 2U, 1U));
+    REQUIRE(video.write(regs + 0x28U, 2U, 0x32U));
+    REQUIRE(video.write(regs + 0xf8U, 2U, 0U)); // Explicitly disabled priority.
+    REQUIRE(video.write(regs + 0xaeU, 2U, 0x7fffU)); // Black BACK away from bitmap.
+    REQUIRE(video.write(platform::VideoRuntime::kVdp2Base, 2U, 0x801fU));
+    video.advanceFrame();
+    REQUIRE(video.lastFrame().pixels[0] == 0xFF000000U);
+    platform::VideoDiagnosticSnapshot capture;
+    bool captured{};
+    video.setDiagnosticSink([&](const auto& snapshot) { capture = snapshot; captured = true; });
+    video.presentFrame();
+    REQUIRE(captured);
+    REQUIRE(capture.composed.pixels[0] == 0xFF000000U);
+    REQUIRE(capture.vdp2Layers[0].pixels[0] == 0xFFFF0000U);
+    REQUIRE(capture.vdp2.pixels[0] == 0xFF000000U);
+}
+
 void addressesVdp2PatternNamePlanes() {
     // Independent table 4.8 expectations for combined map value 0x73,
     // in 4-Mbit VRAM: [character size][name size][plane size].
@@ -2755,6 +2907,78 @@ void resolvesIndirectTargetOnDemand() {
     REQUIRE(module.blockAt(0x108U) != nullptr && module.blockAt(0x108U)->isLowered());
 }
 
+void cachesRuntimeResolutionByRevisionAndCodeGenerations() {
+    const auto image = test::imageFromWords(0x100U, {0xC310U});
+    const auto cfg = sh2::BlockBuilder{}.build(image, std::vector<core::Address>{0x100U});
+    sir::Module module;
+    REQUIRE(sh2::lowerCFG(cfg, module).success());
+    auto* original = module.blockAt(0x100U);
+    REQUIRE(original != nullptr && original->isLowered());
+
+    sir::MachineState state;
+    state.write16BE(0x100U, 0xC310U);
+    sh2::RuntimeBlockResolver resolver(image, module, &state);
+    REQUIRE(resolver.resolve(0x100U, 1U) == original);
+    REQUIRE(resolver.stats().codeCacheHits == 0U);
+    REQUIRE(resolver.resolve(0x100U, 2U) == original);
+    REQUIRE(resolver.stats().codeCacheHits == 1U);
+
+    // A write elsewhere changes the global epoch but not either code page.
+    state.write32BE(0x8000U, 0x12345678U);
+    REQUIRE(resolver.resolve(0x100U, 3U) == original);
+    REQUIRE(resolver.stats().codeCacheHits == 2U);
+    REQUIRE(resolver.resolve(0x100U, 4U) == original);
+    REQUIRE(resolver.stats().codeCacheHits == 3U);
+
+    // Resetting and repopulating the same block object changes its revision.
+    REQUIRE(module.resetBlockAt(0x100U) == original);
+    REQUIRE(!original->isLowered());
+    REQUIRE(sh2::lowerCFG(cfg, module).success());
+    REQUIRE(module.blockAt(0x100U) == original);
+    REQUIRE(original->isLowered());
+    REQUIRE(resolver.resolve(0x100U, 5U) == original);
+    REQUIRE(resolver.stats().codeCacheHits == 3U);
+    REQUIRE(resolver.resolve(0x100U, 6U) == original);
+    REQUIRE(resolver.stats().codeCacheHits == 4U);
+    REQUIRE(resolver.replacements().empty());
+}
+
+void invalidatesRuntimeResolutionForBothCodePages() {
+    const auto checkChange = [](core::Address changedAddress,
+                                std::uint16_t replacementOpcode,
+                                std::size_t expectedStep) {
+        constexpr core::Address start = 0x00001FFEU;
+        const auto image = test::imageFromWords(start, {0x0009U, 0xC310U});
+        const auto cfg = sh2::BlockBuilder{}.build(image, std::vector<core::Address>{start});
+        sir::Module module;
+        REQUIRE(sh2::lowerCFG(cfg, module).success());
+        auto* original = module.blockAt(start);
+        REQUIRE(original != nullptr && original->isLowered());
+
+        sir::MachineState state;
+        state.write16BE(start, 0x0009U);
+        state.write16BE(start + 2U, 0xC310U);
+        sh2::RuntimeBlockResolver resolver(image, module, &state);
+        REQUIRE(resolver.resolve(start, 1U) == original);
+        REQUIRE(resolver.resolve(start, 2U) == original);
+        REQUIRE(resolver.stats().codeCacheHits == 1U);
+
+        state.write16BE(changedAddress, replacementOpcode);
+        REQUIRE(resolver.resolve(start, expectedStep) == original);
+        REQUIRE(resolver.stats().codeCacheHits == 1U);
+        REQUIRE(resolver.replacements().size() == 1U);
+        REQUIRE(resolver.replacements().front().address == start);
+        REQUIRE(resolver.replacements().front().step == expectedStep);
+        REQUIRE(resolver.replacements().front().previousSignatureKnown);
+        REQUIRE(resolver.replacements().front().previousSignature !=
+                resolver.replacements().front().replacementSignature);
+    };
+
+    // The 4096-byte snapshot beginning at 0x1FFE spans 4 KiB pages 1 and 2.
+    checkChange(0x1FFEU, 0xC311U, 31U);
+    checkChange(0x2000U, 0xC312U, 47U);
+}
+
 void executesCodeLoadedAfterBootImageDiscovery() {
     const auto image = test::imageFromWords(0x100U, {0x432BU, 0x0009U, 0xC312U});
     const auto cfg = sh2::BlockBuilder{}.build(image, std::vector<core::Address>{0x100U});
@@ -2785,6 +3009,97 @@ void executesCodeLoadedAfterBootImageDiscovery() {
     REQUIRE(state.read32BE(0x06080000U) == 8U);
     REQUIRE(module.blockAt(0x00220008U) == nullptr);
     REQUIRE(resolver.stats().loweredBlocks == 3U);
+}
+
+void invalidatesResolutionAfterSameBlockHookWrite() {
+    const auto image = test::imageFromWords(0x100U, {0xC310U});
+    const auto cfg = sh2::BlockBuilder{}.build(image, std::vector<core::Address>{0x100U});
+    sir::Module module;
+    REQUIRE(sh2::lowerCFG(cfg, module).success());
+    sir::MachineState state;
+    sh2::RuntimeBlockResolver resolver(image, module, &state);
+    sir::ProgramExecutionOptions options;
+    options.maxSteps = 2U;
+    options.refreshKnownBlocksOnWrite = true;
+    options.resolveBlockAtStep = [&resolver](core::Address address, std::size_t step) {
+        return resolver.resolve(address, step);
+    };
+    options.beforeBlock = [](const sir::BasicBlock&, sir::MachineState& machine, std::size_t) {
+        machine.write16BE(0x100U, 0xC312U);
+    };
+    const auto result = sir::ProgramExecutor{}.run(module.blockAt(0x100U), state, options);
+    REQUIRE(result.status == sir::ProgramStatus::Trap);
+    REQUIRE(result.last.trapVector == 0x12U);
+    REQUIRE(result.steps == 1U);
+    const auto epoch = state.memoryWriteEpoch();
+    state.write16BE(0x100U, 0xC312U);
+    REQUIRE(state.memoryWriteEpoch() == epoch);
+    state.write8(0x102U, 1U);
+    REQUIRE(state.memoryWriteEpoch() > epoch);
+}
+
+void reusesExecutionContextWithoutStaleSnapshots() {
+    class ContextProbe final : public sir::MemoryInterceptor {
+    public:
+        void setExecutionContext(const sir::ExecutionContext& context) override {
+            contexts.push_back(context);
+        }
+        bool requiresStateSnapshot(core::Address address) const noexcept override {
+            return address == 0x100U;
+        }
+        std::optional<std::uint32_t> read(core::Address, std::uint8_t) override {
+            return std::nullopt;
+        }
+        bool write(core::Address, std::uint8_t, std::uint32_t) override {
+            return false;
+        }
+
+        std::vector<sir::ExecutionContext> contexts;
+    } probe;
+
+    sir::Module module;
+    auto& first = module.createBlock(0x100U, "snapshot-first");
+    auto& second = module.createBlock(0x200U, "snapshot-second");
+    auto& third = module.createBlock(0x300U, "snapshot-third");
+    sir::ModuleBuilder builder(module);
+    builder.setInsertPoint(first);
+    builder.branch(&second);
+    builder.setInsertPoint(second);
+    builder.branch(&third);
+    builder.setInsertPoint(third);
+    builder.trap(0x44U);
+
+    sir::MachineState state;
+    state.writeState(4U, 0x11112222U);
+    state.setMemoryInterceptor(&probe);
+    sir::ProgramExecutionOptions options;
+    options.maxSteps = 4U;
+    options.beforeBlock = [](const sir::BasicBlock&, sir::MachineState& machine,
+                             std::size_t step) {
+        machine.writeState(4U, static_cast<std::uint32_t>(0xA000U + step));
+    };
+    const auto result = sir::ProgramExecutor{}.run(&first, state, options);
+
+    REQUIRE(result.status == sir::ProgramStatus::Trap);
+    REQUIRE(result.last.trapVector == 0x44U);
+    REQUIRE(result.steps == 3U);
+    REQUIRE(probe.contexts.size() == 3U);
+    REQUIRE(probe.contexts[0].blockAddress == first.address());
+    REQUIRE(probe.contexts[0].callerBlock == 0U);
+    REQUIRE(probe.contexts[0].step == 0U);
+    REQUIRE(probe.contexts[0].state.at(4U) == 0x11112222U);
+    REQUIRE(probe.contexts[1].blockAddress == second.address());
+    REQUIRE(probe.contexts[1].callerBlock == first.address());
+    REQUIRE(probe.contexts[1].step == 1U);
+    REQUIRE(probe.contexts[1].state.empty());
+    REQUIRE(probe.contexts[2].blockAddress == third.address());
+    REQUIRE(probe.contexts[2].callerBlock == second.address());
+    REQUIRE(probe.contexts[2].step == 2U);
+    REQUIRE(probe.contexts[2].state.empty());
+    // The retained first snapshot is a value copy and remains unchanged after
+    // the shared context map has been cleared and reused for later blocks.
+    REQUIRE(probe.contexts[0].state.size() >= 1U);
+    REQUIRE(probe.contexts[0].state.at(4U) == 0x11112222U);
 }
 
 void recordsRuntimeOverlayReplacementAtResolutionStep() {
@@ -2823,6 +3138,10 @@ void recordsRuntimeOverlayReplacementAtResolutionStep() {
     REQUIRE(replacement.step == 1U);
     REQUIRE(replacement.previousSignatureKnown);
     REQUIRE(replacement.previousSignature != replacement.replacementSignature);
+    REQUIRE(resolver.resolve(0x104U, 99U) == module.blockAt(0x104U));
+    REQUIRE(resolver.stats().codeCacheHits == 1U);
+    REQUIRE(resolver.replacements().size() == 1U);
+    REQUIRE(resolver.replacements().front().step == 1U);
 }
 
 void interceptsSaturnMmioWithoutTouchingRam() {
@@ -3477,6 +3796,107 @@ void injectsScuVblankThroughRte() {
     REQUIRE(state.read32BE(stack - 4U) == 0U);
 }
 
+void profilesSchedulerHotPathsWithoutChangingExecution() {
+    constexpr core::Address entryAddress = 0x100U;
+    constexpr core::Address handlerAddress = 0x200U;
+    constexpr core::Address vbr = 0x400U;
+    constexpr core::Address stack = 0x800U;
+    constexpr std::size_t steps =
+        static_cast<std::size_t>(platform::ScuEventScheduler::kProfileSampleInterval) * 2U;
+
+    sir::Module module;
+    auto& entry = module.createBlock(entryAddress, "profile-main");
+    auto& handler = module.createBlock(handlerAddress, "profile-vblank");
+    sir::ModuleBuilder builder(module);
+    builder.setInsertPoint(entry);
+    builder.branch(&entry);
+    builder.setInsertPoint(handler);
+    builder.returnFromException();
+
+    const auto metricsAreZero = [](const platform::ScuEventScheduler::Stats& stats) {
+        const auto zero = [](const auto& timing) {
+            return timing.calls == 0U && timing.sampledCalls == 0U &&
+                   timing.sampledNanoseconds == 0U &&
+                   timing.estimatedNanoseconds == 0U;
+        };
+        return zero(stats.scspBlockTick) && zero(stats.scspSchedulerTick) &&
+               zero(stats.mmioSchedulerTick) && zero(stats.scspVBlank) &&
+               zero(stats.videoVBlankOut);
+    };
+
+    const auto execute = [&](platform::ScuEventScheduler& scheduler,
+                             platform::MmioInterceptor& mmio,
+                             sir::MachineState& state) {
+        REQUIRE(mmio.write(platform::BootRomServices::kScuInterruptMaskRegister, 4U, 0U));
+        state.writeState(sh2::stateSlot(sh2::Register::VBR), vbr);
+        state.writeState(sh2::stateSlot(sh2::Register::R15), stack);
+        state.writeState(sh2::stateSlot(sh2::Register::SR), 0U);
+        state.write32BE(vbr +
+            static_cast<core::Address>(platform::ScuEventScheduler::kVBlankInVector) * 4U,
+            handlerAddress);
+        scheduler.requestVBlank();
+
+        sir::ProgramExecutionOptions options;
+        options.maxSteps = steps;
+        options.resolveBlock = [&module](core::Address address) {
+            return module.blockAt(address);
+        };
+        options.interrupt = [&scheduler, &mmio](const sir::BasicBlock& block,
+                                               sir::MachineState& machine,
+                                               std::size_t step) {
+            return scheduler.beforeBlock(block, machine, step, mmio);
+        };
+        return sir::ProgramExecutor{}.run(&entry, state, options);
+    };
+
+    platform::ScuEventScheduler schedulerOff;
+    platform::MmioInterceptor mmioOff;
+    sir::MachineState stateOff;
+    REQUIRE(metricsAreZero(schedulerOff.stats()));
+    const auto resultOff = execute(schedulerOff, mmioOff, stateOff);
+    REQUIRE(resultOff.status == sir::ProgramStatus::StepLimit);
+    REQUIRE(metricsAreZero(schedulerOff.stats()));
+
+    platform::ScuEventScheduler schedulerOn;
+    schedulerOn.setProfilingEnabled(true);
+    platform::MmioInterceptor mmioOn;
+    sir::MachineState stateOn;
+    const auto resultOn = execute(schedulerOn, mmioOn, stateOn);
+    REQUIRE(resultOn.status == resultOff.status);
+    REQUIRE(resultOn.steps == resultOff.steps);
+    REQUIRE(stateOn == stateOff);
+    REQUIRE(mmioOn.scuInterruptStatus() == mmioOff.scuInterruptStatus());
+
+    const auto& profile = schedulerOn.stats();
+    REQUIRE(profile.elapsedBlocks == schedulerOff.stats().elapsedBlocks);
+    REQUIRE(profile.vblankEvents == schedulerOff.stats().vblankEvents);
+    REQUIRE(profile.vblankOutEvents == schedulerOff.stats().vblankOutEvents);
+    REQUIRE(profile.hblankEvents == schedulerOff.stats().hblankEvents);
+    REQUIRE(profile.timer0Events == schedulerOff.stats().timer0Events);
+    REQUIRE(profile.cdSubcodeEvents == schedulerOff.stats().cdSubcodeEvents);
+    REQUIRE(profile.deliveredInterrupts == schedulerOff.stats().deliveredInterrupts);
+    REQUIRE(profile.maskedEvents == schedulerOff.stats().maskedEvents);
+    REQUIRE(profile.droppedEvents == schedulerOff.stats().droppedEvents);
+
+    REQUIRE(profile.scspBlockTick.calls == steps);
+    REQUIRE(profile.scspBlockTick.sampledCalls == 2U);
+    // The IRQ enters the handler at step 0, so its same-step scheduler poll
+    // is counted even though elapsed block time advances only once.
+    REQUIRE(profile.scspSchedulerTick.calls == steps + 1U);
+    REQUIRE(profile.scspSchedulerTick.sampledCalls == 2U);
+    REQUIRE(profile.mmioSchedulerTick.calls == steps + 1U);
+    REQUIRE(profile.mmioSchedulerTick.sampledCalls == 2U);
+    REQUIRE(profile.scspVBlank.calls == 1U);
+    REQUIRE(profile.scspVBlank.sampledCalls == 1U);
+    REQUIRE(profile.videoVBlankOut.calls == 1U);
+    REQUIRE(profile.videoVBlankOut.sampledCalls == 1U);
+
+    schedulerOn.setProfilingEnabled(false);
+    REQUIRE(metricsAreZero(schedulerOn.stats()));
+    schedulerOn.setProfilingEnabled(true);
+    REQUIRE(metricsAreZero(schedulerOn.stats()));
+}
+
 void returnsFromScuFirmwareCallbackThroughExceptionBridge() {
     constexpr core::Address entryAddress = 0x100U;
     constexpr core::Address callbackAddress = 0x200U;
@@ -3615,6 +4035,12 @@ void registerSirTests(test::Registry& registry) {
     registry.add("saturn: composes VDP2 interleaved cell scroll",
                  composesVdp2ContinuousBitmapWithInterleavedCellScroll);
     registry.add("saturn: composes VDP2 cell pattern name and tile", composesVdp2CellPatternNameAndTile);
+    registry.add("saturn: VDP2 cell cache preserves updates, traces and scratch clearing",
+                 keepsVdp2CellCacheLocalAndTraceCountsPerDot);
+    registry.add("saturn: VDP2 packed 4-bit spans match diagnostic samples",
+                 matchesVdp2Packed4BitSpansToDiagnosticSamples);
+    registry.add("saturn: VDP2 zero priority still appears in diagnostic layer capture",
+                 capturesVdp2ZeroPriorityLayerBeforeSkippingItsMerge);
     registry.add("saturn: addresses VDP2 pattern name planes", addressesVdp2PatternNamePlanes);
     registry.add("saturn: composes pages within multi-page VDP2 planes",
                  composesVdp2PagesWithinMultiPagePlanes);
@@ -3632,10 +4058,18 @@ void registerSirTests(test::Registry& registry) {
     registry.add("saturn: renders VDP1 eight-bit bank sprite from CRAM",
                  rendersVdp1EightBitBankSpriteFromCram);
     registry.add("sir: resolves indirect target on demand", resolvesIndirectTargetOnDemand);
+    registry.add("sir: caches runtime resolution by revision and code generations",
+                 cachesRuntimeResolutionByRevisionAndCodeGenerations);
+    registry.add("sir: invalidates runtime resolution for both code pages",
+                 invalidatesRuntimeResolutionForBothCodePages);
     registry.add("sir: executes code loaded after boot image discovery",
                  executesCodeLoadedAfterBootImageDiscovery);
     registry.add("sir: timestamps runtime overlay replacement",
                  recordsRuntimeOverlayReplacementAtResolutionStep);
+    registry.add("sir: invalidates resolution after same-block hook writes",
+                 invalidatesResolutionAfterSameBlockHookWrite);
+    registry.add("sir: reuses execution context without stale snapshots",
+                 reusesExecutionContextWithoutStaleSnapshots);
     registry.add("sir: intercepts Saturn MMIO", interceptsSaturnMmioWithoutTouchingRam);
     registry.add("sir: bounds retained MMIO access history",
                  boundsRetainedMmioAccessHistory);
@@ -3666,6 +4100,8 @@ void registerSirTests(test::Registry& registry) {
     registry.add("saturn: swaps VDP1 manual framebuffer at presentation",
                  swapsVdp1ManualFramebufferAtPresentation);
     registry.add("saturn: injects SCU VBlank through RTE", injectsScuVblankThroughRte);
+    registry.add("saturn: scheduler profiling is sampled and execution-neutral",
+                 profilesSchedulerHotPathsWithoutChangingExecution);
     registry.add("saturn: returns from SCU firmware callback bridge",
                  returnsFromScuFirmwareCallbackThroughExceptionBridge);
 }

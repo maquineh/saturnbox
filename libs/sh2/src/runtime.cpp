@@ -76,8 +76,63 @@ RuntimeBlockResolver::RuntimeBlockResolver(const core::MemoryMap& image, sir::Mo
     failedCodeSignatures_.reserve(64U);
 }
 
+void RuntimeBlockResolver::rememberBlock(Address address, sir::BasicBlock* block,
+                                         std::uint64_t codeSignature) {
+    CachedBlock cached;
+    cached.block = block;
+    cached.revision = block->revision();
+    if (runtimeMemory_) {
+        constexpr Address kSnapshotBytes = 4096U;
+        const auto lastAddress = address > std::numeric_limits<Address>::max() -
+                (kSnapshotBytes - 1U)
+            ? std::numeric_limits<Address>::max()
+            : static_cast<Address>(address + kSnapshotBytes - 1U);
+        cached.firstCodePageGeneration = runtimeMemory_->memoryWriteGeneration(address);
+        cached.lastCodePageGeneration =
+            runtimeMemory_->memoryWriteGeneration(lastAddress);
+        cached.writeEpoch = runtimeMemory_->memoryWriteEpoch();
+    }
+    blockCache_.insert_or_assign(address, cached);
+    blockCodeSignatures_.insert_or_assign(address, codeSignature);
+}
+
 sir::BasicBlock* RuntimeBlockResolver::resolve(Address address, std::size_t step) {
     ++stats_.requests;
+
+    auto* existing = module_.blockAt(address);
+    if (const auto cached = blockCache_.find(address);
+        cached != blockCache_.end() && existing != nullptr &&
+        cached->second.block == existing &&
+        existing->revision() == cached->second.revision && existing->isLowered()) {
+        bool codeIsCurrent = runtimeMemory_ == nullptr;
+        if (runtimeMemory_) {
+            const auto epoch = runtimeMemory_->memoryWriteEpoch();
+            if (epoch == cached->second.writeEpoch) {
+                codeIsCurrent = true;
+            } else {
+                constexpr Address kSnapshotBytes = 4096U;
+                const auto lastAddress = address > std::numeric_limits<Address>::max() -
+                        (kSnapshotBytes - 1U)
+                    ? std::numeric_limits<Address>::max()
+                    : static_cast<Address>(address + kSnapshotBytes - 1U);
+                const auto firstGeneration =
+                    runtimeMemory_->memoryWriteGeneration(address);
+                const auto lastGeneration =
+                    runtimeMemory_->memoryWriteGeneration(lastAddress);
+                if (firstGeneration == cached->second.firstCodePageGeneration &&
+                    lastGeneration == cached->second.lastCodePageGeneration) {
+                    cached->second.writeEpoch = epoch;
+                    codeIsCurrent = true;
+                }
+            }
+        }
+        if (codeIsCurrent) {
+            ++stats_.reusedBlocks;
+            ++stats_.codeCacheHits;
+            return existing;
+        }
+    }
+
     auto snapshot = snapshotCode(image_, runtimeMemory_, address);
     if (!snapshot.valid && runtimeMemory_) {
         // This fallback is only for addresses present in the immutable boot
@@ -95,30 +150,18 @@ sir::BasicBlock* RuntimeBlockResolver::resolve(Address address, std::size_t step
         return nullptr;
     }
 
-    auto* existing = module_.blockAt(address);
-    if (const auto cached = blockCache_.find(address);
-        cached != blockCache_.end() && cached->second == existing) {
-        const auto code = blockCodeSignatures_.find(address);
-        if (code != blockCodeSignatures_.end() && code->second == snapshot.signature &&
-            existing && existing->isLowered()) {
-            ++stats_.reusedBlocks;
-            return existing;
-        }
-    }
-
     if (existing && existing->isLowered()) {
         auto previous = blockCodeSignatures_.find(address);
         if (previous == blockCodeSignatures_.end() && image_.contains(address, 2U)) {
             const auto imageSnapshot = snapshotCode(image_, nullptr, address);
             if (imageSnapshot.valid && imageSnapshot.signature == snapshot.signature) {
-                blockCache_.insert_or_assign(address, existing);
-                blockCodeSignatures_.insert_or_assign(address, snapshot.signature);
+                rememberBlock(address, existing, snapshot.signature);
                 ++stats_.reusedBlocks;
                 return existing;
             }
         } else if (previous != blockCodeSignatures_.end() &&
                    previous->second == snapshot.signature) {
-            blockCache_.insert_or_assign(address, existing);
+            rememberBlock(address, existing, snapshot.signature);
             ++stats_.reusedBlocks;
             return existing;
         }
@@ -155,8 +198,7 @@ sir::BasicBlock* RuntimeBlockResolver::resolve(Address address, std::size_t step
         return nullptr;
     }
     failedCodeSignatures_.erase(address);
-    blockCache_.insert_or_assign(address, resolved);
-    blockCodeSignatures_.insert_or_assign(address, snapshot.signature);
+    rememberBlock(address, resolved, snapshot.signature);
     return resolved;
 }
 
@@ -167,8 +209,8 @@ const DynamicResolutionStats& RuntimeBlockResolver::stats() const noexcept {
 std::vector<Address> RuntimeBlockResolver::resolvedAddresses() const {
     std::vector<Address> addresses;
     addresses.reserve(blockCache_.size());
-    for (const auto& [address, block] : blockCache_) {
-        if (block != nullptr) addresses.push_back(address);
+    for (const auto& [address, cached] : blockCache_) {
+        if (cached.block != nullptr) addresses.push_back(address);
     }
     std::sort(addresses.begin(), addresses.end());
     return addresses;

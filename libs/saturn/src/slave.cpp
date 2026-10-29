@@ -110,6 +110,7 @@ bool SlaveSh2::tick(sir::MachineState& state, BootRomServices& services,
     // that ratio allowed DMA to see partially decoded textures. This is an
     // event-driven service boundary, not a cycle-accurate CPU/bus model.
     constexpr std::size_t kBurstLimit = 100'000U;
+    sir::ExecutionContext context;
     for (std::size_t burst = 0; burst < kBurstLimit; ++burst) {
         const auto* block = resolve(pc_, step);
         if (!block || block->instructions().empty()) {
@@ -117,7 +118,10 @@ bool SlaveSh2::tick(sir::MachineState& state, BootRomServices& services,
             break;
         }
         state.writeState(sir::kProgramCounterStateSlot, pc_);
-        sir::ExecutionContext context{pc_, previous_, step, {}};
+        context.blockAddress = pc_;
+        context.callerBlock = previous_;
+        context.step = step;
+        context.state.clear();
         if (memory_->requiresStateSnapshot(pc_)) context.state = state.stateSlots();
         state.setExecutionContext(context);
         services.executeService(*block, state);

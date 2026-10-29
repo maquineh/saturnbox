@@ -15,6 +15,7 @@ namespace saturn::sh2 {
 struct DynamicResolutionStats {
     std::size_t requests{};
     std::size_t reusedBlocks{};
+    std::size_t codeCacheHits{};
     std::size_t loweredBlocks{};
     std::size_t replacedBlocks{};
     std::size_t failures{};
@@ -42,13 +43,24 @@ public:
     [[nodiscard]] const std::vector<RuntimeOverlayReplacement>& replacements() const noexcept;
 
 private:
+    struct CachedBlock {
+        sir::BasicBlock* block{};
+        std::uint64_t revision{};
+        std::uint64_t firstCodePageGeneration{};
+        std::uint64_t lastCodePageGeneration{};
+        std::uint64_t writeEpoch{};
+    };
+
+    void rememberBlock(Address address, sir::BasicBlock* block,
+                       std::uint64_t codeSignature);
+
     const core::MemoryMap& image_;
     sir::Module& module_;
     const sir::MachineState* runtimeMemory_{};
     // Indirect dispatch is hot in the Saturn runtime (SCU/CD/VDP callbacks
     // revisit the same targets every frame). Keep a direct address cache so
     // the common path avoids repeated module map lookups.
-    std::unordered_map<Address, sir::BasicBlock*> blockCache_;
+    std::unordered_map<Address, CachedBlock> blockCache_;
     std::unordered_map<Address, std::uint64_t> blockCodeSignatures_;
     std::unordered_map<Address, std::uint64_t> failedCodeSignatures_;
     std::vector<Address> replacedAddresses_;
