@@ -2,6 +2,7 @@ param(
     [string]$DiscImage = 'H:/Isos/Rockman X4 (J)(Saturn)(ISO).mdf',
     [string]$Renderer = 'auto',
     [long]$VBlankBlocks = 10000,
+    [long]$LiveAfterBlocks = 160000000,
     [string]$ExecutablePath,
     [string]$DebugSession,
     [string]$AudioOutput,
@@ -77,7 +78,7 @@ $runnerArguments = @(
     '--disc', $disc, '--disc-sector-size', '2448',
     '--vblank-blocks', "$VBlankBlocks",
     '--pad-sequence', $padSequence,
-    '--pad-live-after-blocks', '160000000',
+    '--pad-live-after-blocks', "$LiveAfterBlocks",
     '--renderer', $Renderer
 )
 if (-not [string]::IsNullOrWhiteSpace($DebugSession)) {
@@ -105,7 +106,14 @@ if ($ScspDriver) {
     Write-Output "Sequence requests: $ScspRequests"
 }
 
-Write-Output 'Opening X4. The known menu route and READY transition run first; live controls take over at 160M blocks.'
+Write-Output "Opening X4. The known menu route and READY transition run first; live controls take over at $LiveAfterBlocks blocks."
 Write-Output 'Once the stage appears, use arrows / Z-X-C / Enter or an XInput controller.'
+# The emulator writes diagnostics to stderr (for example the live debugger's
+# "snapshots dropped" warning). With $ErrorActionPreference = 'Stop' PowerShell
+# turns that into a NativeCommandError and would terminate the session, so the
+# game runs with the preference relaxed and the exit code checked afterwards.
+$ErrorActionPreference = 'Continue'
 & $executable @runnerArguments
-exit $LASTEXITCODE
+$runnerExit = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+exit $runnerExit
