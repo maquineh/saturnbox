@@ -267,6 +267,22 @@ As janelas de áudio estão em `build-scsp/tmp-test/boss-clips/`
 instante e o conjunto exclusivo estão medidos; o nome depende de ouvir os
 clipes.
 
+### Caráter espectral dos one-shots do banco 3
+
+Medindo os renders do probe (energia acima de 4 kHz, planura espectral e
+cruzamentos de zero) os três candidatos se separam:
+
+| cue | pico | energia >4 kHz | planura | cruzamentos/s | leitura |
+| --- | --- | --- | --- | --- | --- |
+| `b3 s14` | 0,60 | 5,8% | 0,059 | 1039 | tonal, grave — compatível com voz/jingle |
+| `b3 s5` | 0,71 | 10,6% | 0,111 | 1906 | misto |
+| `b3 s7` | 0,58 | 16,1% | 0,163 | 3056 | ruidoso e brilhante — compatível com impacto/explosão |
+
+Isso é coerente com a leitura por gatilho: `b3 s7`/`b3 s5` são os sons de
+acerto (evento, sem correlação com entrada) e `b3 s14` é o mais tonal dos três,
+aparecendo só na transição do chefe. Ainda assim, "tonal" não distingue uma voz
+de um jingle: essa parte continua dependendo de escuta.
+
 ## A família de 42 bytes é um one-shot parametrizado
 
 Sessenta e nove das 113 entradas têm exatamente 42 bytes (banco 3: 25, banco 4:
