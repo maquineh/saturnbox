@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <sstream>
+#include <string>
 #include <utility>
 
 namespace saturn::platform {
@@ -212,6 +214,41 @@ void VideoRuntime::composeFrame() {
 std::uint64_t VideoRuntime::frameCount() const noexcept { return frameCount_; }
 bool VideoRuntime::framePending() const noexcept { return framePending_; }
 const VideoFrame& VideoRuntime::lastFrame() const noexcept { return lastFrame_; }
+
+std::string VideoRuntime::describeVdp2Pixel(unsigned x, unsigned y) const {
+    std::ostringstream out;
+    if (x >= kFrameWidth || y >= frameHeight()) return std::string{"pixel out of range"};
+    const auto index = static_cast<std::size_t>(y) * kFrameWidth + x;
+    const auto& composite = vdp2CompositePixels_[index];
+    const auto layerName = [](std::uint8_t layer) {
+        static constexpr std::array<const char*, 8> table{
+            "nbg0", "nbg1", "nbg2", "nbg3", "back", "sprite", "rbg0", "?"};
+        return layer < table.size() ? table[layer] : "?";
+    };
+    out << "(" << x << "," << y << ") top=" << layerName(composite.topLayer)
+        << ":" << unsigned(composite.topPriority)
+        << " color=0x" << std::hex << composite.topColor << std::dec;
+    if ((composite.flags & kVdp2PixelSecondValid) != 0U) {
+        out << " second=" << layerName(composite.secondLayer)
+            << ":" << unsigned(composite.secondPriority);
+    }
+    if ((composite.flags & kVdp2PixelThirdValid) != 0U) {
+        out << " third-pending";
+    }
+    // The VDP1 side of the same pixel, decoded from the displayed bank.
+    const auto& bank = vdp1Framebuffers_[vdp1DisplayBank_];
+    const auto sourceIndex = static_cast<std::size_t>(y) * kVdp1FramebufferWidth + x;
+    const auto value = static_cast<std::uint16_t>(
+        (bank[sourceIndex * 2U] << 8U) | bank[sourceIndex * 2U + 1U]);
+    std::uint8_t spritePriority{};
+    std::uint8_t ratio{};
+    const auto color = decodeVdp1FramebufferPixel(value, spritePriority, ratio);
+    out << " vdp1=0x" << std::hex << value << std::dec
+        << " spriteColor=0x" << std::hex << color << std::dec
+        << " spritePriority=" << unsigned(spritePriority)
+        << " composed=0x" << std::hex << lastFrame_.pixels[index] << std::dec;
+    return out.str();
+}
 
 void VideoRuntime::setDebugEventSink(std::function<void(std::string_view)> sink) {
     debugEventSink_ = std::move(sink);

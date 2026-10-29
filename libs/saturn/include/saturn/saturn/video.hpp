@@ -339,6 +339,11 @@ public:
     [[nodiscard]] std::uint64_t frameCount() const noexcept;
     [[nodiscard]] bool framePending() const noexcept;
     [[nodiscard]] const VideoFrame& lastFrame() const noexcept;
+    // Human-readable description of what wins at one screen pixel: the VDP2
+    // layer priority chain (after the special priority function) and the VDP1
+    // sprite colour/priority decoded from the displayed framebuffer. Used by
+    // --vdp2-probe to settle occlusion cases with data instead of guesses.
+    [[nodiscard]] std::string describeVdp2Pixel(unsigned x, unsigned y) const;
     [[nodiscard]] bool consumeFrame(VideoFrame& output);
     // Present the latest composed frame to the host. Drawing and composition
     // may happen several times between VBlank edges; presentation is paced by

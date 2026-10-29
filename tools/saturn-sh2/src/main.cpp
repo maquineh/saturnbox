@@ -122,6 +122,8 @@ struct Arguments {
     std::optional<std::size_t> padThirdPressAfterBlocks;
     std::optional<std::size_t> padThirdReleaseAfterBlocks;
     std::optional<std::size_t> frameCaptureAfterBlocks;
+    // X:Y pixel reported by the VDP2/VDP1 arbitration probe once per frame.
+    std::optional<std::pair<unsigned, unsigned>> vdp2Probe;
     std::size_t maxSteps{1'000'000};
     std::size_t vblankPeriodBlocks{};
     bool stepsSpecified{};
@@ -2763,6 +2765,17 @@ std::optional<Arguments> parseArguments(int argc, char** argv) {
             arguments.resourceBase = *value;
         } else if (option == "--frame-dir") {
             arguments.frameDirectory = std::filesystem::path(argv[++index]);
+        } else if (option == "--vdp2-probe") {
+            const std::string_view text = argv[++index];
+            const auto colon = text.find(':');
+            if (colon == std::string_view::npos) return std::nullopt;
+            try {
+                arguments.vdp2Probe = std::pair<unsigned, unsigned>{
+                    static_cast<unsigned>(std::stoul(std::string(text.substr(0, colon)), nullptr, 0)),
+                    static_cast<unsigned>(std::stoul(std::string(text.substr(colon + 1)), nullptr, 0))};
+            } catch (...) {
+                return std::nullopt;
+            }
         } else if (option == "--debug-session") {
             arguments.debugSessionDirectory = std::filesystem::path(argv[++index]);
         } else if (option == "--black-frame-probe") {
@@ -6078,7 +6091,7 @@ int boot(const Arguments& arguments) {
         metadata.caller = snapshot.contextCaller;
         liveDebug->recordPhase(phase, std::move(snapshot), std::move(metadata));
     });
-    if (arguments.frameDirectory || realtimeWindow != nullptr || liveDebug) {
+    if (arguments.frameDirectory || realtimeWindow != nullptr || liveDebug || arguments.vdp2Probe) {
         const auto directory = arguments.frameDirectory ? *arguments.frameDirectory
                                                          : std::filesystem::path{};
         std::error_code error;
@@ -6140,6 +6153,12 @@ int boot(const Arguments& arguments) {
                     debugAttachNextFrame = false;
                 }
                 liveDebug->recordFrame(std::move(snapshot), std::move(metadata));
+            }
+            if (arguments.vdp2Probe) {
+                std::cout << "vdp2-probe frame=" << mmio.video().frameCount() << " "
+                          << mmio.video().describeVdp2Pixel(arguments.vdp2Probe->first,
+                                                           arguments.vdp2Probe->second)
+                          << '\n';
             }
             if (arguments.frameDirectory) {
                 ++presentedFrames;
