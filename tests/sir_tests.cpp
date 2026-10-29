@@ -1892,6 +1892,85 @@ void composesVdp2LayersBehindVdp1() {
     REQUIRE(frame.pixels[2] == 0xFF0000FFU);
 }
 
+// VDP2 special priority (SFPRMD, VDP2 Manual 11.2): modes 1 and 2 replace the
+// least significant bit of a scroll screen's priority number with a bit coming
+// from the pattern name data. Rockman X4 programs SFPRMD = 0x0015 (mode 1 on
+// NBG0/NBG1/NBG2) so foreground cells can cover VDP1 sprites.
+void vdp2SpecialPriorityLiftsPatternPriorityOverSprites() {
+    platform::MmioInterceptor mmio;
+    const auto vdp2 = platform::VideoRuntime::kVdp2Base;
+    const auto vdp2Registers = platform::VideoRuntime::kVdp2Registers;
+    const auto vdp1 = platform::VideoRuntime::kVdp1Base;
+    const auto vdp1Registers = platform::VideoRuntime::kVdp1Registers;
+    const auto writeVdp1 = [&mmio, vdp1](std::uint32_t offset, std::uint16_t value) {
+        REQUIRE(mmio.write(vdp1 + offset, 2, value));
+    };
+
+    REQUIRE(mmio.write(vdp2Registers + 0x000U, 2, 0x8000U)); // display
+    REQUIRE(mmio.write(vdp2Registers + 0x020U, 2, 0x0001U)); // NBG0
+    REQUIRE(mmio.write(vdp2Registers + 0x028U, 2, 0x0010U)); // cell, 256 colors
+    REQUIRE(mmio.write(vdp2Registers + 0x02CU, 2, 0U));
+    REQUIRE(mmio.write(vdp2Registers + 0x030U, 2, 0U)); // two-word pattern names
+    REQUIRE(mmio.write(vdp2Registers + 0x03AU, 2, 0U)); // 1x1 page
+    REQUIRE(mmio.write(vdp2Registers + 0x03CU, 2, 0U));
+    REQUIRE(mmio.write(vdp2Registers + 0x070U, 2, 0U)); // map offset 0
+    REQUIRE(mmio.write(vdp2Registers + 0x074U, 2, 0U)); // scroll 0
+    REQUIRE(mmio.write(vdp2Registers + 0x0AEU, 2, 0x0100U)); // BACK elsewhere
+    REQUIRE(mmio.write(vdp2Registers + 0x0E0U, 2, 0x0025U)); // mixed, SPTYPE 5
+    REQUIRE(mmio.write(vdp2Registers + 0x00EU, 2, 0U)); // 1024-color CRAM mode
+    REQUIRE(mmio.write(vdp2Registers + 0x0E4U, 2, 0U)); // no colour offset
+    REQUIRE(mmio.write(vdp2Registers + 0x0E6U, 2, 0x0010U)); // SPCAOS = 1
+    REQUIRE(mmio.write(vdp2Registers + 0x0F2U, 2, 0x0400U)); // sprite register 3 = 4
+    REQUIRE(mmio.write(vdp2Registers + 0x0F8U, 2, 0x0004U)); // NBG0 priority = 4
+    REQUIRE(mmio.write(platform::VideoRuntime::kVdp2Cram + 0x0002U, 2, 0x001FU));
+    REQUIRE(mmio.write(platform::VideoRuntime::kVdp2Cram + 0x0402U, 2, 0x03E0U));
+
+    // Character 1 holds colour index 1 on its first dot; the pattern name keeps
+    // the two-word layout, so bit 15 of the lower word is the special bit.
+    REQUIRE(mmio.write(vdp2 + 0x0020U, 2, 0x0100U));
+    REQUIRE(mmio.write(vdp2 + 0x0000U, 2, 0x0000U)); // upper: palette 0
+    REQUIRE(mmio.write(vdp2 + 0x0002U, 2, 0x0001U)); // lower: character 1
+
+    writeVdp1(0x000U, 0x0000U); // normal sprite
+    writeVdp1(0x004U, 0x0000U); // 4-bit bank mode
+    writeVdp1(0x006U, 0x3000U); // SPTYPE-5 priority selector 3
+    writeVdp1(0x008U, 0x0040U);
+    writeVdp1(0x00AU, 0x0101U); // 8x1
+    writeVdp1(0x00CU, 0U); writeVdp1(0x00EU, 0U);
+    writeVdp1(0x200U, 0x1000U); // opaque green texel at x=0
+    writeVdp1(0x020U, 0x8000U);
+
+    platform::VideoFrame frame;
+    // Mode 0: the priority register stands, and the sprite wins the tie.
+    REQUIRE(mmio.write(vdp2Registers + 0x0EAU, 2, 0x0000U));
+    REQUIRE(mmio.write(vdp1Registers + 0x04U, 2, 1U));
+    REQUIRE(mmio.video().consumeFrame(frame));
+    REQUIRE(frame.pixels[0U] == 0xFF00FF00U);
+
+    // Mode 1 with the pattern special bit set lifts NBG0 from 4 to 5, so the
+    // cell covers the sprite.
+    REQUIRE(mmio.write(vdp2 + 0x0002U, 2, 0x8001U));
+    REQUIRE(mmio.write(vdp2Registers + 0x0EAU, 2, 0x0001U));
+    REQUIRE(mmio.write(vdp1Registers + 0x04U, 2, 1U));
+    REQUIRE(mmio.video().consumeFrame(frame));
+    REQUIRE(frame.pixels[0U] == 0xFFFF0000U);
+
+    // Mode 1 with the bit clear keeps priority 4 and the sprite still wins.
+    REQUIRE(mmio.write(vdp2 + 0x0002U, 2, 0x0001U));
+    REQUIRE(mmio.write(vdp2Registers + 0x0EAU, 2, 0x0001U));
+    REQUIRE(mmio.write(vdp1Registers + 0x04U, 2, 1U));
+    REQUIRE(mmio.video().consumeFrame(frame));
+    REQUIRE(frame.pixels[0U] == 0xFF00FF00U);
+
+    // A resulting priority of zero is transparent, as the manual requires.
+    REQUIRE(mmio.write(vdp2Registers + 0x0F8U, 2, 0x0001U)); // NBG0 priority = 1
+    REQUIRE(mmio.write(vdp2 + 0x0002U, 2, 0x0001U));         // special bit clear
+    REQUIRE(mmio.write(vdp2Registers + 0x0EAU, 2, 0x0001U));
+    REQUIRE(mmio.write(vdp1Registers + 0x04U, 2, 1U));
+    REQUIRE(mmio.video().consumeFrame(frame));
+    REQUIRE(frame.pixels[0U] == 0xFF00FF00U); // sprite, NBG0 dot is transparent
+}
+
 void comparesVdp1SpritePriorityPerPixelWithVdp2Layer() {
     platform::MmioInterceptor mmio;
     const auto vdp2 = platform::VideoRuntime::kVdp2Base;
@@ -4012,6 +4091,8 @@ void registerSirTests(test::Registry& registry) {
     registry.add("saturn: composes VDP2 layers behind VDP1", composesVdp2LayersBehindVdp1);
     registry.add("saturn: compares VDP1 sprite and VDP2 priorities per pixel",
                  comparesVdp1SpritePriorityPerPixelWithVdp2Layer);
+    registry.add("saturn: VDP2 special priority lifts cell priority over sprites",
+                 vdp2SpecialPriorityLiftsPatternPriorityOverSprites);
     registry.add("saturn: calculates VDP2 color across top and second layers",
                  calculatesVdp2ColorBetweenTopAndSecondLayers);
     registry.add("saturn: calculates sprite color and VDP2 shadows",

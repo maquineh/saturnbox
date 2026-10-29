@@ -33,6 +33,33 @@ devem ser classificados como defeito só por conterem cópias ou pixels vazios.
 As poses opacas acumuladas e os retângulos listrados acima são evidências
 distintas. Esta inspeção não demonstra defeito de colisão/hitbox.
 
+## Prioridade especial de VDP2 (implementada em 29/10)
+
+O caso "X na frente do pilar" era a lacuna registrada como prioridade especial de
+VDP2. A captura de diagnóstico do estágio (`frame_069705_registers.bin`, bloco
+294M) mostra o registro **SFPRMD (`0x0EA`) = `0x0015`**: modo 1 em NBG0, NBG1 e
+NBG2 (bits 1:0, 3:2 e 5:4), modo 0 em NBG3 e RBG0. O jogo usa mesmo o recurso —
+e o emulador o ignorava, então o pilar ficava com a prioridade do registro (4)
+empatado com o sprite de X, e o desempate dava o sprite na frente.
+
+Implementação em `libs/saturn/src/video.cpp`:
+
+- `composeVdp2Cell` grava, por dot, o bit de prioridade especial vindo do
+  pattern name (bit 15 da palavra única, ou bit 15 da palavra inferior no
+  formato de duas palavras). No modo 2 o bit só vale quando o código de cor do
+  dot casa com o código de função especial.
+- `mergeLayer` troca apenas o **bit menos significativo** da prioridade da
+  camada (`(registro & ~1) | bit`), mantendo os dois bits superiores do
+  registro, e trata prioridade resultante zero como transparente.
+- RBG0 e as camadas bitmap continuam em modo 0; o modo 1 bitmap (bit do
+  registro de paleta) ainda não é lido.
+
+O teste `saturn: VDP2 special priority lifts cell priority over sprites` monta
+uma camada de células em 256 cores e um sprite de mesma prioridade: no modo 0 o
+sprite vence, no modo 1 com o bit do pattern name ligado a célula sobe para 5 e
+cobre o sprite, com o bit desligado o sprite volta a vencer, e com prioridade de
+registro 1 e bit 0 o dot fica transparente.
+
 ## VDP1: troca e apagamento dos framebuffers
 
 Em `libs/saturn/src/video.cpp:710–740`, `startVdp1Draw()` arma a troca sempre

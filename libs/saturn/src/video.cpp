@@ -1587,7 +1587,8 @@ void VideoRuntime::composeVdp2(
     const auto mergeLayer = [&](const std::vector<std::uint32_t>& layer,
                                 const std::vector<std::uint8_t>& calculationFlags,
                                 unsigned layerPriority, std::uint8_t layerIndex,
-                                std::uint8_t compositeLayer) {
+                                std::uint8_t compositeLayer,
+                                unsigned specialPriorityMode) {
         if (layerPriority == 0U) return;
         const auto layerRatio = colorCalculationRatioForLayer(compositeLayer);
         const auto specialMode = static_cast<unsigned>(
@@ -1607,7 +1608,15 @@ void VideoRuntime::composeVdp2(
             auto& composite = vdp2CompositePixels_[index];
             const auto colorCalculationEnabled = screenColorCalculationEnabled &&
                 (specialMode == 0U || calculationFlags[index] != 0U);
-            const auto priority = static_cast<std::uint8_t>(layerPriority);
+            // The upper two priority bits always come from the priority
+            // register; the special priority function only replaces the least
+            // significant bit, and a resulting priority of zero is transparent.
+            auto priority = static_cast<std::uint8_t>(layerPriority);
+            if (specialPriorityMode != 0U && index < vdp2SpecialScratch_.size()) {
+                priority = static_cast<std::uint8_t>(
+                    (layerPriority & ~1U) | (vdp2SpecialScratch_[index] != 0U ? 1U : 0U));
+                if (priority == 0U) continue;
+            }
             if (isAboveVdp2Candidate(priority, compositeLayer,
                                      composite.topPriority, composite.topLayer)) {
                 const auto oldTopScreenColorCalculation =
@@ -1657,9 +1666,18 @@ void VideoRuntime::composeVdp2(
     const auto prepareLayer = [&] {
         vdp2LayerScratch_.assign(pixels.size(), transparent);
         vdp2CalculationScratch_.assign(pixels.size(), 0U);
+        vdp2SpecialScratch_.assign(pixels.size(), 0U);
     };
     auto& layer = vdp2LayerScratch_;
     auto& calculationFlags = vdp2CalculationScratch_;
+    // SFPRMD selects the special priority mode per scroll screen: 0 keeps the
+    // priority register value, 1 takes the least significant bit from the
+    // pattern name data and 2 only for the dots that match the special
+    // function code (VDP2 User's Manual 11.2).
+    const auto specialPriorityModeRegister = vdp2Register(0x0EAU);
+    const auto layerSpecialMode = [&](unsigned layerIndex) {
+        return static_cast<unsigned>((specialPriorityModeRegister >> (layerIndex * 2U)) & 0x3U);
+    };
     // Diagnostic layer captures and map traces must still see disabled layers.
     const auto skipZeroPriority = layerFrames == nullptr &&
         !mapReadTraceEnabled_ && !(diagnosticCaptureEnabled_ && diagnosticSink_);
@@ -1675,11 +1693,11 @@ void VideoRuntime::composeVdp2(
             composeVdp2Cell(layer, 0U, chctla, vdp2Register(0x030U), mpofn,
                             vdp2Register(0x040U), vdp2Register(0x042U),
                             vdp2Register(0x070U), vdp2Register(0x074U),
-                            nullptr, &calculationFlags);
+                            nullptr, &calculationFlags, &vdp2SpecialScratch_);
         }
         if (layerFrames != nullptr) (*layerFrames)[0].pixels = layer;
         mergeLayer(layer, calculationFlags, n0Priority, kVdp2LayerNbg0,
-                   kVdp2LayerNbg0);
+                   kVdp2LayerNbg0, layerSpecialMode(0U));
     };
     const auto drawNbg1 = [&] {
         if ((bgon & kVdp2Nbg1Enable) == 0U) return;
@@ -1697,11 +1715,11 @@ void VideoRuntime::composeVdp2(
             composeVdp2Cell(layer, 1U, chctla, vdp2Register(0x032U), mpofn,
                             vdp2Register(0x044U), vdp2Register(0x046U),
                             vdp2Register(0x080U), vdp2Register(0x084U),
-                            nullptr, &calculationFlags);
+                            nullptr, &calculationFlags, &vdp2SpecialScratch_);
         }
         if (layerFrames != nullptr) (*layerFrames)[1].pixels = layer;
         mergeLayer(layer, calculationFlags, n1Priority, kVdp2LayerNbg1,
-                   kVdp2LayerNbg1);
+                   kVdp2LayerNbg1, layerSpecialMode(1U));
     };
     const auto drawNbg2 = [&] {
         if ((bgon & kVdp2Nbg2Enable) == 0U) return;
@@ -1712,10 +1730,10 @@ void VideoRuntime::composeVdp2(
         composeVdp2Cell(layer, 2U, vdp2Register(0x02AU), vdp2Register(0x034U),
                         mpofn, vdp2Register(0x048U), vdp2Register(0x04AU),
                         vdp2Register(0x090U), vdp2Register(0x092U),
-                        nullptr, &calculationFlags);
+                        nullptr, &calculationFlags, &vdp2SpecialScratch_);
         if (layerFrames != nullptr) (*layerFrames)[2].pixels = layer;
         mergeLayer(layer, calculationFlags, n2Priority, kVdp2LayerNbg2,
-                   kVdp2LayerNbg2);
+                   kVdp2LayerNbg2, layerSpecialMode(2U));
     };
     const auto drawNbg3 = [&] {
         if ((bgon & kVdp2Nbg3Enable) == 0U) return;
@@ -1728,16 +1746,16 @@ void VideoRuntime::composeVdp2(
         composeVdp2Cell(layer, 3U, vdp2Register(0x02AU), vdp2Register(0x036U),
                         mpofn, vdp2Register(0x04CU), vdp2Register(0x04EU),
                         vdp2Register(0x094U), vdp2Register(0x096U),
-                        nullptr, &calculationFlags);
+                        nullptr, &calculationFlags, &vdp2SpecialScratch_);
         if (layerFrames != nullptr) (*layerFrames)[3].pixels = layer;
         mergeLayer(layer, calculationFlags, n3Priority, kVdp2LayerNbg3,
-                   kVdp2LayerNbg3);
+                   kVdp2LayerNbg3, layerSpecialMode(3U));
     };
     const auto drawRbg0 = [&] {
         if ((bgon & 0x0010U) == 0U || rbg0Priority == 0U) return;
         prepareLayer();
         composeVdp2RotationBitmap(layer, &calculationFlags);
-        mergeLayer(layer, calculationFlags, rbg0Priority, 4U, kVdp2LayerRbg0);
+        mergeLayer(layer, calculationFlags, rbg0Priority, 4U, kVdp2LayerRbg0, 0U);
     };
     drawNbg3();
     drawNbg2();
@@ -1958,7 +1976,16 @@ void VideoRuntime::composeVdp2Cell(std::vector<std::uint32_t>& pixels, unsigned 
                                    std::uint16_t mapAB, std::uint16_t mapCD,
                                    std::uint16_t scrollX, std::uint16_t scrollY,
                                    std::vector<VideoCellSample>* samples,
-                                   std::vector<std::uint8_t>* colorCalculationFlags) {
+                                   std::vector<std::uint8_t>* colorCalculationFlags,
+                                   std::vector<std::uint8_t>* specialPriority) {
+    // Special priority (SFPRMD): modes 1 and 2 take the least significant bit
+    // of the priority number from the pattern name data (mode 2 only for the
+    // dots whose colour code matches the special function code). Mode 0 keeps
+    // the priority register value untouched.
+    const auto specialPriorityMode = static_cast<unsigned>(
+        (vdp2Register(0x0EAU) >> (layer * 2U)) & 0x3U);
+    const auto specialPrioritySelect = vdp2Register(0x024U);
+    const auto specialPriorityCodes = vdp2Register(0x026U);
     const auto windowControl = vdp2Register(layer < 2U ? 0x0D0U : 0x0D2U);
     const bool windowsEnabled = (windowControl & (0x000AU << ((layer & 1U) * 8U))) != 0U;
     const auto colors = layer == 0U ? (characterControl >> 4U) & 0x7U
@@ -2072,6 +2099,9 @@ void VideoRuntime::composeVdp2Cell(std::vector<std::uint32_t>& pixels, unsigned 
         auto cachedPntAddress = static_cast<std::size_t>(-1);
         std::uint16_t upper{}, lower{};
         unsigned palette{}, character{}, flip{};
+        // Special priority bit from the pattern name data: bit 15 of the single
+        // word, or bit 15 of the lower word in the two-word form.
+        unsigned patternSpecialPriority{};
         for (std::uint32_t x = 0; x < kFrameWidth; ++x) {
             const auto sourceX = (static_cast<std::size_t>(x) + (scrollX & 0x07FFU)) & (screenWidth - 1U);
             const auto planeX = static_cast<unsigned>(sourceX >> planeWidthShift);
@@ -2086,6 +2116,9 @@ void VideoRuntime::composeVdp2Cell(std::vector<std::uint32_t>& pixels, unsigned 
                 cachedPntAddress = pntAddress;
                 upper = vdp2VramWord(pntAddress);
                 lower = oneWord ? std::uint16_t{0} : vdp2VramWord(pntAddress + 2U);
+                patternSpecialPriority = oneWord
+                    ? static_cast<unsigned>((upper >> 15U) & 1U)
+                    : static_cast<unsigned>((lower >> 15U) & 1U);
                 if (oneWord) {
                     palette = colors == 0U
                         ? static_cast<unsigned>((upper >> 12U) & 0xFU) | (auxPalette << 4U)
@@ -2143,6 +2176,16 @@ void VideoRuntime::composeVdp2Cell(std::vector<std::uint32_t>& pixels, unsigned 
                     const auto rawColorData = vdp2CramWord(
                         static_cast<std::size_t>(paletteBase + index) * 2U);
                     pixels[outputBase + n] = rgb555ToArgb(rawColorData);
+                    if (specialPriority != nullptr) {
+                        const auto specialLsb = specialPriorityMode == 0U ||
+                                patternSpecialPriority == 0U ? 0U
+                            : specialPriorityMode == 1U ? 1U
+                            : (vdp2SpecialColorCodeMatches(specialPrioritySelect,
+                                                           specialPriorityCodes,
+                                                           layer, index) ? 1U : 0U);
+                        (*specialPriority)[outputBase + n] =
+                            static_cast<std::uint8_t>(specialLsb);
+                    }
                     if (colorCalculationFlags != nullptr && specialMode != 0U) {
                         // This path is always palette format; retain the same
                         // special-function policy as the generic pixel path.
@@ -2204,6 +2247,15 @@ void VideoRuntime::composeVdp2Cell(std::vector<std::uint32_t>& pixels, unsigned 
             if (color != 0U && (!windowsEnabled || vdp2WindowAllows(layer, x, y))) {
                 const auto outputIndex = static_cast<std::size_t>(y) * kFrameWidth + x;
                 pixels[outputIndex] = color;
+                if (specialPriority != nullptr) {
+                    const auto specialLsb = specialPriorityMode == 0U ||
+                            patternSpecialPriority == 0U ? 0U
+                        : specialPriorityMode == 1U ? 1U
+                        : (vdp2SpecialColorCodeMatches(specialPrioritySelect,
+                                                       specialPriorityCodes,
+                                                       layer, dotColorCode) ? 1U : 0U);
+                    (*specialPriority)[outputIndex] = static_cast<std::uint8_t>(specialLsb);
+                }
                 if (colorCalculationFlags != nullptr && specialMode != 0U) {
                     const auto patternSpecialColorCalculation = oneWord
                         ? (patternControl & 0x0100U) != 0U

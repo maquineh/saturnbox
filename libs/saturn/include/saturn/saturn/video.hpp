@@ -438,7 +438,8 @@ private:
                          std::uint16_t mapC, std::uint16_t scrollX,
                          std::uint16_t scrollY,
                          std::vector<VideoCellSample>* samples = nullptr,
-                         std::vector<std::uint8_t>* colorCalculationFlags = nullptr);
+                         std::vector<std::uint8_t>* colorCalculationFlags = nullptr,
+                         std::vector<std::uint8_t>* specialPriority = nullptr);
     [[nodiscard]] bool vdp2WindowAllows(unsigned layer, unsigned x,
                                          unsigned y) const noexcept;
     void drawVdp1Command(std::size_t offset, std::uint16_t control);
@@ -488,6 +489,9 @@ private:
     // Layers are rendered/merged sequentially; retain scratch storage between frames.
     std::vector<std::uint32_t> vdp2LayerScratch_;
     std::vector<std::uint8_t> vdp2CalculationScratch_;
+    // Per-dot least significant bit of the priority number from the VDP2
+    // special priority function (SFPRMD), one byte per output pixel.
+    std::vector<std::uint8_t> vdp2SpecialScratch_;
     Vdp1CommandStats vdp1CommandStats_{};
     std::shared_ptr<Vdp1ComputeRenderer> vdp1Renderer_;
     std::vector<Vdp1Primitive> vdp1Batch_;
