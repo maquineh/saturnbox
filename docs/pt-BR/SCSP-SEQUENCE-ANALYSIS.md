@@ -201,6 +201,43 @@ Conclusão operacional: **chegar ao chefe exige jogo humano** (ou um savestate n
 porta do chefe). O launcher já grava áudio e todos os comandos, então a sessão
 jogada é o único insumo que falta.
 
+### Chegada ao chefe com pokes de vida (29/10)
+
+A varredura de snapshots apontou a vida do jogador nos bytes
+`0x060545FC`–`0x060545FE`: os três valem `0x20` (32) com a barra cheia, caem
+juntos a cada dano e voltam a `0x20` no respawn (a série completa é
+`32,29,26,20,18,15,13,13,8,…,3,0,32,32,…`). Com `--poke-file` reescrevendo
+esses bytes a cada 150 mil passos, a rota de 400M de blocos (disparo a cada 3M,
+salto a cada 7M) sobreviveu até o fim, em vez de reiniciar a fase.
+
+O resultado aparece na linha do tempo dos pedidos:
+
+| tempo | evento |
+| --- | --- |
+| até 350,7 s | `c6b3s2`/`c7b3s2` (base/ambiência) retriggerados a cada ~0,6 s |
+| 350,7–352,3 s | **nenhum pedido** por ~1,5 s: a base para |
+| 352,3 / 352,9 / 353,2 s | `c5b3s7`, `c5b3s5`, `c5b3s5` — três one-shots do banco 3 |
+| 355,2 s → 404,4 s | `c4b0s2` (70 pedidos) e, de 362,3 s, `c5b0s3` (79) |
+| 356,7 e 360,1 s | `c6b3s14` (one-shot do banco 3) |
+| 365,2 / 366,7 s | `c1b0s15` e `c1b0s16` |
+| 404,0 s | `c7b1s12`, e a seção nova termina |
+
+O áudio acompanha: o RMS salta de ~0,15 para ~0,25 e o pico satura em 1,0 a
+partir de ~356 s, contra pico ~0,7 antes. Três coisas ficam evidentes:
+
+1. a rota passou a alcançar uma seção nova por volta de 350–356 s, coerente com
+   a chegada do chefe;
+2. os candidatos a WARNING estão entre `c5b3s7`, `c5b3s5` (352–353 s) e
+   `c6b3s14` (356,7 s), todos do banco 3 — a família one-shot que também é a
+   candidata a vozes;
+3. a seção nova satura a saída em 1,0, o que é um problema de ganho separado.
+
+As janelas de áudio estão em `build-scsp/tmp-test/boss-clips/`
+(`09-transition-350-356.wav`, `08-three-oneshots-352.2-354.6.wav`,
+`03-c6b3s14-355-360.wav`, `04-c1b0s15-16-364-369.wav`,
+`05-boss-section-370-378.wav`). Nomear o WARNING exige escuta: a mecânica e o
+instante estão medidos, o nome depende de ouvir os clipes.
+
 ## A família de 42 bytes é um one-shot parametrizado
 
 Sessenta e nove das 113 entradas têm exatamente 42 bytes (banco 3: 25, banco 4:

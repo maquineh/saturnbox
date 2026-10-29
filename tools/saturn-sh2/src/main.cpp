@@ -2718,6 +2718,7 @@ std::optional<Arguments> parseArguments(int argc, char** argv) {
               option == "--control-trace-from-step" ||
              option == "--pad-sequence" ||
              option == "--poke" ||
+             option == "--poke-file" ||
              option == "--watch-memory" ||
              option == "--watch-dir" ||
              option == "--watch-from" ||
@@ -2797,6 +2798,47 @@ std::optional<Arguments> parseArguments(int argc, char** argv) {
             arguments.controlTraceOreg2Only = true;
         } else if (option == "--pad-sequence") {
             arguments.padSequence = argv[++index];
+        } else if (option == "--poke-file") {
+            // One STEP:ADDR:VALUE[:WIDTH] per line, blank lines and '#' ignored.
+            std::ifstream pokeFile(argv[++index]);
+            if (!pokeFile) return std::nullopt;
+            std::string line;
+            while (std::getline(pokeFile, line)) {
+                const auto comment = line.find('#');
+                if (comment != std::string::npos) line.resize(comment);
+                const auto first = line.find_first_not_of(" \t\r\n");
+                if (first == std::string::npos) continue;
+                const auto last = line.find_last_not_of(" \t\r\n");
+                line = line.substr(first, last - first + 1);
+                std::vector<std::string> parts;
+                std::size_t start = 0;
+                while (true) {
+                    const auto position = line.find(':', start);
+                    parts.emplace_back(line.substr(start, position == std::string::npos
+                                                               ? std::string::npos
+                                                               : position - start));
+                    if (position == std::string::npos) break;
+                    start = position + 1;
+                }
+                if (parts.size() < 3 || parts.size() > 4) return std::nullopt;
+                try {
+                    const auto step = std::stoull(parts[0], nullptr, 0);
+                    const auto address = std::stoull(parts[1], nullptr, 0);
+                    const auto value = std::stoull(parts[2], nullptr, 0);
+                    const auto width = parts.size() == 4
+                        ? std::stoull(parts[3], nullptr, 0) : 1ULL;
+                    if (address > 0xFFFFFFFFULL || value > 0xFFFFFFFFULL ||
+                        (width != 1 && width != 2 && width != 4)) {
+                        return std::nullopt;
+                    }
+                    arguments.pokes.emplace_back(static_cast<std::size_t>(step),
+                                                 static_cast<saturn::core::Address>(address),
+                                                 static_cast<std::uint32_t>(value),
+                                                 static_cast<std::uint8_t>(width));
+                } catch (...) {
+                    return std::nullopt;
+                }
+            }
         } else if (option == "--poke") {
             // STEP:ADDR:VALUE[:WIDTH], all numbers in decimal or 0x form.
             const std::string_view text = argv[++index];
