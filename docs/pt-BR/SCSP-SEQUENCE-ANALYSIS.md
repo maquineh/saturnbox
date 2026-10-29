@@ -283,6 +283,42 @@ acerto (evento, sem correlação com entrada) e `b3 s14` é o mais tonal dos tr�
 aparecendo só na transição do chefe. Ainda assim, "tonal" não distingue uma voz
 de um jingle: essa parte continua dependendo de escuta.
 
+### Evidência visual: o chefe, a explosão e a ausência de um cue de WARNING
+
+Capturas determinísticas de quadro com `--frame-capture-after-blocks` no mesmo
+percurso (sete instantes, todos em `build-scsp/tmp-test/frame-*/`):
+
+| bloco | tempo | o quadro mostra |
+| --- | --- | --- |
+| 278.000.000 | 331,0 s | cidade, placa "CRTCOM", **sem** chefe e sem barra de chefe |
+| 280.000.000 | 333,3 s | máquina grande à direita e barra de vida de chefe já presente |
+| 282.000.000 | 335,7 s | Vile (armadura verde) com a barra de chefe e clarão amarelo atrás |
+| 286.000.000 | 340,5 s | barra de chefe, chefe fora de quadro |
+| 290.000.000 | 345,2 s | Vile em pé, barra de chefe, X à direita |
+| 294.000.000 | 350,0 s | barra de chefe e clarão amarelo grande |
+| 296.000.000 | 352,4 s | o chefe não está mais na cena |
+
+Nenhum dos sete quadros mostra o texto "WARNING". A chegada do chefe fica
+entre 331,0 s (sem barra) e 333,3 s (com barra), portanto o banner, se existe,
+está nesse intervalo de ~2 s.
+
+Com isso, o desfecho do chefe fica localizado: ele aparece entre 331 e 333 s, a
+luta segue até ~350 s, há explosões e em 352,4 s o sprite já não está. Os três
+one-shots ruidosos de 352,3–353,2 s (`b3 s7`, `b3 s5`, `b3 s5`) coincidem com
+esse desfecho, então a **explosão fica identificada por três evidências
+independentes**: visual (clarão e chefe ausente), espectral (o som mais ruidoso
+do banco 3) e de gatilho (evento, sem correlação com entrada).
+
+Já o aviso do chefe **não tem sequência dedicada** nesta captura: entre 320 e
+355 s os únicos pedidos são os habituais da fase (`b3 s2`, `b3 s7`, `b3 s5`,
+`b0 s19`, `b2 s0/s3/s6`, `b1 s0/s1/s3`), e o primeiro cue novo é `c4 b0 s2` em
+355,25 s, depois da luta. A música da fase continua tocando na chegada do
+chefe. Como o próprio player de sequência é quem aciona as amostras dentro da
+música já em execução, um eventual aviso sonoro viria dessa sequência — que o
+emulador reproduz integralmente. Medindo onsets no áudio entre 326 e 342 s, os
+picos (764 em 338,0 s, 707 em 335,3 s) são só ~2× o p95 da janela anterior
+(377), sem um evento isolado que se destaque: não há som novo faltando ali.
+
 ## A família de 42 bytes é um one-shot parametrizado
 
 Sessenta e nove das 113 entradas têm exatamente 42 bytes (banco 3: 25, banco 4:
