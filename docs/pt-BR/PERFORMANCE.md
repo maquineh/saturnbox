@@ -5,6 +5,21 @@ mantém o período de 14.000 blocos por VBlank e executa a emulação completa,
 incluindo o 68000 e os slots SCSP. O modo sem janela mede capacidade de
 processamento; ele não mede a taxa de apresentação do monitor.
 
+## Controle de velocidade interativa
+
+O frontend usa o mesmo relógio de apresentação para CPU e Vulkan. A fila de
+áudio pode liberar apenas um pequeno avanço inicial para preenchimento; depois
+disso, uma fila baixa não suspende o limite de 60 quadros. Antes, uma fila
+baixa podia desativar o limite e deixar uma máquina rápida avançar o jogo
+sem controle de velocidade, independentemente do renderer ou do modo de áudio.
+O resumo do frontend informa os quadros com fila baixa como `audio low-buffer
+frames`; eles ainda podem indicar cortes de áudio. Na sessão Vulkan
+`build/sessions/x4-debug-fixed-vulkan-20261030-1313/`, o percurso inicial ficou
+perto de 60 apresentações por segundo e chegou ao controle ao vivo após 160
+milhões de blocos. Em 215,1 segundos havia 12.723 apresentações (59,1 por
+segundo); o título da janela marcava 60,0 FPS naquele momento. A telemetria
+contava 15 falhas de áudio nessa sessão.
+
 ## Resultado medido em 2026-10-29
 
 Máquina: Intel Core i7-9700 e NVIDIA RTX 3080, MSVC Release, SCSP real,
@@ -141,7 +156,7 @@ documentado do [waveOutWrite](https://learn.microsoft.com/en-us/windows/win32/ap
 
 ## Interpretar o perfil
 
-`--profile` imprime os custos de SCSP por bloco, mailbox, scheduler MMIO,
+`--profile` imprime os custos de SCSP por bloco, scheduler SCSP, scheduler MMIO,
 SCSP no VBlank e vídeo no VBlank OUT. Os três caminhos frequentes medem uma
 chamada a cada 1009 e estimam o total pela média das amostras; os caminhos de
 VBlank medem todas as chamadas. A amostragem e o relógio acrescentam custo,

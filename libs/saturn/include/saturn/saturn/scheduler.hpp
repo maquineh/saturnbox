@@ -80,9 +80,9 @@ public:
     void requestVBlank() noexcept;
 
     // Called from ProgramExecutionOptions::interrupt at each block boundary.
-    // It advances time, services the secondary-processor mailbox, raises the
-    // VBlank status factor, and returns the registered handler target when
-    // the SCU mask/SR allow delivery.
+    // It advances time and peripheral clocks, raises VBlank status factors,
+    // and returns the registered handler target when the SCU mask/SR allow
+    // delivery. The old framebuffer-mailbox fallback is limited to period 0.
     [[nodiscard]] std::optional<sir::InterruptRequest> beforeBlock(
         const sir::BasicBlock& block, sir::MachineState& state,
         std::size_t step, MmioInterceptor& mmio);

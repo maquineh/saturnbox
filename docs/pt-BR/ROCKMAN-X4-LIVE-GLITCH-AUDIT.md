@@ -81,19 +81,47 @@ O acúmulo do X na nova imagem coincide aproximadamente com a região superior
 que esse comando não cobriria. É uma pista para inspecionar ambos os bancos,
 não prova de que aquela lista era a lista ativa às 26:57.
 
-## VDP2: prioridade especial ausente
+## VDP2: correção de leitura da prioridade especial (30/10)
 
-`mergeLayer()` usa uma prioridade fixa por plano em `video.cpp:1488–1511`.
-A composição não consulta SFPRMD (`0x0EA`) e a decodificação do tile em
-`video.cpp:1970–1990` não propaga seu bit de prioridade especial.
+A implementação inicial de 29/10 consultava SFPRMD, mas lia o bit da origem
+errada. Em pattern names de duas palavras, o bit especial é o bit 13 da palavra
+superior; em entradas de uma palavra, vem do bit 9 do PNCN. A implementação
+anterior usava o bit 15 da palavra inferior/entrada e ignorava as peças de
+foreground vistas na captura 53.015. A leitura foi corrigida em
+`libs/saturn/src/video.cpp`; o bit de `BMPNA` também alimenta a prioridade das
+camadas bitmap.
 
-O [manual de prioridade especial do VDP2](https://www.infochunk.com/saturn/segahtml_en/hard/vdp2/hon/p11_20.htm)
-define que o modo 1 obtém o bit menos significativo da prioridade a partir do
-pattern name de cada tile. A captura anterior de frame 53.015 tem SFPRMD
-`0x0015`, ativando esse modo para NBG0/1/2. NBG0 tem prioridade base 4 e os
-comandos do X examinados selecionam prioridade 4. Um tile com bit especial 1
-teria prioridade 5 e passaria à frente do X. O compositor atual perde essa
-distinção. Falta verificar o pattern name do pilar no ponto de sobreposição.
+Uma camada com prioridade-base zero também não pode ser descartada antes de
+SFPRMD: com bit especial 1, sua prioridade calculada é 1 e o pixel é visível.
+Os padrões do pilar na captura 53.015 incluem `0x2044` no NBG0; com `PRINA=4` e
+`SFPRMD=0x0015`, o bit 13 eleva a prioridade para 5, acima da prioridade 4 do X.
+Nas referências novas de 30/10, o pilar cobre o personagem onde os dois se
+cruzam; essa é a relação de oclusão esperada. O replay atualizado em
+`build/artifacts/x4-red-trail-replay-20261030/` também mostra o personagem atrás
+do pilar nesse ponto.
+
+## Pixels coloridos durante o movimento (30/10)
+
+O usuário esclareceu que os pixels/trilhas mudam de cor conforme a posição do
+X e aparecem quando ele se desloca. O compositor e a janela são refeitos por
+quadro; não há persistência no bitmap do frontend. A reconstrução de uma pose
+capturada é coerente, mas não contém os pixels fora do lugar da imagem enviada.
+
+O replay controlado segurou direita entre os blocos 160M e 170M, capturou o
+bloco 168M e concluiu em 172M (`step-limit`, saída 0). O quadro 53.075 mostra
+o X atrás do pilar, mas não reproduz as trilhas coloridas das imagens do usuário.
+O banco exibido tem 28.927 pixels não vazios; o outro banco está vazio após a
+troca. Artefatos: `build/artifacts/x4-red-trail-replay-20261030/` e
+`build/tmp/x4-red-trail-replay-20261030.log`.
+
+O histórico local tem duas escritas `PTMR=1` por campo, com ambas as listas
+desenhadas no mesmo banco antes da troca. O HLE termina cada lista
+sincronamente, e a limpeza VBE ocorre somente na troca; a lista capturada
+também inclui um polígono zero que cobre Y=110–239. A acumulação de partes da
+pose acima de Y=110 continua possível, mas esse replay não comprova que seja a
+causa dos pixels nas imagens novas. Não é seguro limpar o banco em toda escrita
+PTMR, limitar a segunda lista ou filtrar uma cor sem observar o mesmo quadro
+antes e depois da segunda lista.
 
 ## Áudio, desempenho e captura
 
@@ -165,9 +193,74 @@ Capturas e manifests:
 `build/artifacts/vdp1-before-20261027-run2/`,
 `build/artifacts/vdp1-after-20261027-final/`, e JSONs homônimos em `build/tmp/`.
 Isso valida esse caso e as regressões de bancos/limpeza; não prova que toda
-explosão deformada ou sobreposição do vídeo esteja corrigida. A prioridade
-especial VDP2 permanece pendente.
+explosão deformada ou sobreposição do vídeo esteja corrigida. A leitura de
+prioridade especial também foi corrigida, mas precisa de replay visual para
+confirmar os pontos de oclusão das novas imagens. As capturas F8 posteriores
+identificaram outra origem para os pixels coloridos durante o movimento:
+interceptação de RAM pelo serviço AIP, descrita abaixo.
 
 Também foram implementados o [debugger de captura ao vivo](LIVE-DEBUGGER.md)
 e a [execução isolada do driver SCSP](SCSP-DRIVER-PROBE.md), para fechar os
 próximos casos com dados sincronizados.
+
+## Captura F8 de 30/10: causa dos riscos e áudio
+
+As 17 marcações F8 da sessão `build/sessions/x4-red-trail-live-20261030-01/`
+confirmaram que as barras coloridas já estavam nos dados de textura antes da
+composição. A origem não era o framebuffer nem a prioridade de camadas: o
+`BootRomServices::read()` continuava sintetizando leituras da palavra AIP
+`0x0600318C` durante o gameplay. O jogo reutiliza essa área dentro do
+buffer de sprites iniciado em `0x06003000`; uma cópia LZ lia o contador falso
+como dado e o propagava para a textura.
+
+A primeira correção desligava a interceptação somente em `SYS_EXECDMP`.
+O probe, que marcava explicitamente esse serviço, passou: no job da captura 2
+da sessão 01, as divergências caíram de 329 para zero nos 1.920 bytes
+exportados. Entretanto, a sessão 02, iniciada com esse executável, voltou a
+registrar os riscos. Seus primeiros POST contêm WRAM sincronizada:
+
+- `capture0001/post_0008_ram_high.bin`: origem comprimida `0x060BC5E2`,
+  2.944 bytes decodificados e 40 bytes divergentes; palavras zero viraram
+  `0x0571`. A textura VDP1 coincide com a WRAM corrompida.
+- `capture0002/post_0008_ram_high.bin`: origem `0x060BD3CA`, 2.688 bytes
+  decodificados e 92 bytes divergentes, incluindo palavras falsas `0x0584`.
+  A textura VDP1 também coincide com a WRAM.
+- `capture0013/post_0008_ram_high.bin`: origem `0x060BC5E2`, 40 bytes
+  divergentes com o valor `0x065F`. Nesse instante, a VRAM ainda contém outra
+  pose; a diferença entre as poses não foi contada como corrupção de DMA.
+
+Esses arquivos estão em
+`build/sessions/x4-red-trail-live-20261030-02/session-1793379341323-0/`.
+O boot curto com trace esclareceu o motivo da primeira correção incompleta:
+a AIP do X4 salta diretamente de `0x06002F56` para a entrada do programa
+`0x06010000`, sem chamar `SYS_EXECDMP`. O trace em
+`build/tmp/x4-aip-handoff-trace-1m-20261030.log` alcança essa entrada e não
+registra nenhuma chamada ao serviço.
+
+O lifecycle agora possui `BootRomServices::completeAipHandoff()`, chamado
+pelo runner antes de executar `expectedEntry`. O caminho `SYS_EXECDMP`
+também chama essa API. O probe usa a mesma API para declarar que o snapshot
+já pertence ao gameplay. Reexecutando os jobs das capturas 1, 2 e 13 da
+sessão 02, tanto o interpretador quanto o JIT produziram zero divergências
+nos 1.920 bytes exportados, contra a decodificação independente. Foram
+4.078 blocos nas capturas 1/13 e 3.874 na captura 2. A correção não altera o
+renderizador, o ciclo de limpeza do VDP1 nem a oclusão VDP2.
+
+O executável alternativo `saturn-sh2-handoff-fixed.exe` foi compilado em
+Release para preservar a sessão antiga ainda aberta. A validação visual ao
+vivo após reiniciar com a correção completa ainda falta; os probes não
+substituem essa confirmação.
+
+A sessão original iniciou com `scsp_driver=0` e `PCM HLE`; seus contadores
+registraram zero key-ons do driver, compatível com a falta de vozes e efeitos
+por sequência. Os launchers `launch_x4_stage.ps1` e `launch_x4_debug.ps1`
+agora usam o driver SCSP 68000 por padrão. `-HleAudio` seleciona o caminho
+PCM simplificado. A saída audível dos efeitos específicos ainda precisa ser
+confirmada na nova sessão ao vivo.
+
+O aviso `capture record/size limit reached` veio do debugger F8, que limita
+cada captura a 48 registros e descarta fases intermediárias excedentes. A
+sessão relatou 305 snapshots de diagnóstico descartados; isso não descarta
+quadros do jogo nem amostras de áudio. O debugger preservou 17 capturas; o
+warning foi acionado pelo limite de registros de uma captura, antes do limite
+global de dados da sessão.

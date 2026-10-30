@@ -83,6 +83,10 @@ public:
     // through PR so the application can continue into its runtime.
     void setExecuteDmpReturns(bool enabled) noexcept;
 
+    // AIP code can branch directly to the loaded program without calling
+    // SYS_EXECDMP. Release its temporary RAM interception on either path.
+    void completeAipHandoff() noexcept;
+
     // Initializes the documented boot state, writes the service pointers into
     // sparse RAM, and materializes the corresponding host-owned SIR block.
     void install(sir::Module& module, sir::MachineState& state);
@@ -111,6 +115,7 @@ private:
     std::map<core::Address, sir::BasicBlock*> entrypoints_;
     MmioInterceptor* mmio_{};
     bool executeDmpReturns_{};
+    bool aipSyncActive_{true};
     core::Address slaveEntryPoint_{};
     std::uint16_t syncValue_{};
     std::vector<BootServiceCall> calls_;

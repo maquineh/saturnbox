@@ -78,12 +78,17 @@ void BootRomServices::install(sir::Module& module, sir::MachineState& state) {
         state.write32BE(kDefaultVectorBase + vector * 4U, kDummyInterruptHandler);
     }
     syncValue_ = 0;
+    aipSyncActive_ = true;
     slaveEntryPoint_ = 0U;
     calls_.clear();
 }
 
 void BootRomServices::setExecuteDmpReturns(bool enabled) noexcept {
     executeDmpReturns_ = enabled;
+}
+
+void BootRomServices::completeAipHandoff() noexcept {
+    aipSyncActive_ = false;
 }
 
 void BootRomServices::attachMmio(MmioInterceptor& mmio) noexcept {
@@ -124,6 +129,12 @@ void BootRomServices::executeService(const sir::BasicBlock& block,
     if ((block.address() < kStubAddress || block.address() > kBupInitStubAddress) &&
         (block.address() < kBupFunctionTableFirst ||
          block.address() > kBupFunctionTableLast)) return;
+    if (block.address() == kExitStubAddress) {
+        // SYS_EXECDMP ends the AIP. Its synchronization word is ordinary
+        // application RAM after handoff and may be reused for sprite data.
+        completeAipHandoff();
+        return;
+    }
     if (block.address() == kBupInitStubAddress) {
         // Mirrors Yabause's BiosBUPInit: R5 receives the function table and
         // R6 receives a six-word device descriptor list.  A Saturn with no
@@ -270,7 +281,7 @@ std::optional<std::uint32_t> BootRomServices::read(core::Address address,
     // A real Saturn changes it from the boot/CD service side; advancing it on
     // each observed halfword gives the single-threaded executor the same
     // observable progress without inventing a RAM write.
-    if (address == kAipSyncWord && width == 2) {
+    if (aipSyncActive_ && address == kAipSyncWord && width == 2) {
         syncValue_ = static_cast<std::uint16_t>(syncValue_ + 1U);
         return syncValue_;
     }

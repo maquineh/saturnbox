@@ -271,7 +271,7 @@ bool ScspRuntime::write(core::Address address, std::uint8_t width,
     return false;
 }
 
-void ScspRuntime::onSchedulerTick(sir::MachineState& state) {
+void ScspRuntime::onSchedulerTick() {
     ++stats_.schedulerTicks;
     // Service a pending sound-driver batch before the SH-2's next poll.
     // The game sets bit 7 at 0x25A004E0 and waits for acknowledgement.
@@ -281,6 +281,9 @@ void ScspRuntime::onSchedulerTick(sir::MachineState& state) {
         serviceSoundCommands();
         ram_[commandOffset] = static_cast<std::uint8_t>(ram_[commandOffset] & 0x7FU);
     }
+}
+
+void ScspRuntime::serviceFramebufferMailboxFallback(sir::MachineState& state) {
     const auto request0 = state.read16BE(kRequest0) != 0U;
     const auto request1 = state.read16BE(kRequest1) != 0U;
     const auto requested = static_cast<std::uint8_t>((request0 ? 1U : 0U) |
@@ -302,9 +305,8 @@ void ScspRuntime::onSchedulerTick(sir::MachineState& state) {
         return;
     }
 
-    // This is the observable part of the producer: the counter advances and
-    // each newly requested completion word becomes non-zero so its polling
-    // loop can pass.
+    // This approximation is only used when a diagnostic harness disables
+    // periodic VBlank, so it cannot affect the guest's gameplay field clock.
     state.write16BE(kSequence,
                     static_cast<std::uint16_t>(state.read16BE(kSequence) + 1U));
     if ((newRequests & 1U) != 0U) {

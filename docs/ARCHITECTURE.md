@@ -33,9 +33,11 @@ path by priority, decodes PNT and 8×8 or 16×16 cells, and arranges consecutive
 pages in VDP2 1×1, 2×1, or 2×2 planes. The output retains per-pixel priorities
 so VDP2 color calculation and shadow can be applied before RGB is committed to
 `VideoFrame`.
-`ScspRuntime` models `0x05A/0x05B` RAM and registers, handles the observed
-mailbox, and plays a subset of PCM Start/Stop commands. It does not execute the
-68K or emulate the complete SCSP. SMPC implements a byte-only interface, basic
+`ScspRuntime` models `0x05A/0x05B` RAM and registers and plays a subset of PCM
+Start/Stop commands. The X4 VDP1 field-sync words are owned by guest VBlank
+callbacks; only harnesses without a periodic VBlank use the legacy fallback.
+The runtime does not execute the 68K or emulate the complete SCSP. SMPC
+implements a byte-only interface, basic
 reset commands, and `INTBACK` for two digital pads, sampled at VBlank.
 
 On Windows x64, `Win64JitBlockExecutor` compiles 32-bit operations on demand,

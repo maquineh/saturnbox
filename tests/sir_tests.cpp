@@ -1925,8 +1925,8 @@ void vdp2SpecialPriorityLiftsPatternPriorityOverSprites() {
     REQUIRE(mmio.write(platform::VideoRuntime::kVdp2Cram + 0x0002U, 2, 0x001FU));
     REQUIRE(mmio.write(platform::VideoRuntime::kVdp2Cram + 0x0402U, 2, 0x03E0U));
 
-    // Character 1 holds colour index 1 on its first dot; the pattern name keeps
-    // the two-word layout, so bit 15 of the lower word is the special bit.
+    // Character 1 holds colour index 1 on its first dot; two-word pattern names
+    // take the special priority bit from bit 13 of the upper word.
     REQUIRE(mmio.write(vdp2 + 0x0020U, 2, 0x0100U));
     REQUIRE(mmio.write(vdp2 + 0x0000U, 2, 0x0000U)); // upper: palette 0
     REQUIRE(mmio.write(vdp2 + 0x0002U, 2, 0x0001U)); // lower: character 1
@@ -1949,13 +1949,15 @@ void vdp2SpecialPriorityLiftsPatternPriorityOverSprites() {
 
     // Mode 1 with the pattern special bit set lifts NBG0 from 4 to 5, so the
     // cell covers the sprite.
-    REQUIRE(mmio.write(vdp2 + 0x0002U, 2, 0x8001U));
+    REQUIRE(mmio.write(vdp2 + 0x0000U, 2, 0x2000U));
+    REQUIRE(mmio.write(vdp2 + 0x0002U, 2, 0x0001U));
     REQUIRE(mmio.write(vdp2Registers + 0x0EAU, 2, 0x0001U));
     REQUIRE(mmio.write(vdp1Registers + 0x04U, 2, 1U));
     REQUIRE(mmio.video().consumeFrame(frame));
     REQUIRE(frame.pixels[0U] == 0xFFFF0000U);
 
     // Mode 1 with the bit clear keeps priority 4 and the sprite still wins.
+    REQUIRE(mmio.write(vdp2 + 0x0000U, 2, 0x0000U));
     REQUIRE(mmio.write(vdp2 + 0x0002U, 2, 0x0001U));
     REQUIRE(mmio.write(vdp2Registers + 0x0EAU, 2, 0x0001U));
     REQUIRE(mmio.write(vdp1Registers + 0x04U, 2, 1U));
@@ -1964,7 +1966,8 @@ void vdp2SpecialPriorityLiftsPatternPriorityOverSprites() {
 
     // A resulting priority of zero is transparent, as the manual requires.
     REQUIRE(mmio.write(vdp2Registers + 0x0F8U, 2, 0x0001U)); // NBG0 priority = 1
-    REQUIRE(mmio.write(vdp2 + 0x0002U, 2, 0x0001U));         // special bit clear
+    REQUIRE(mmio.write(vdp2 + 0x0000U, 2, 0x0000U));        // special bit clear
+    REQUIRE(mmio.write(vdp2 + 0x0002U, 2, 0x0001U));
     REQUIRE(mmio.write(vdp2Registers + 0x0EAU, 2, 0x0001U));
     REQUIRE(mmio.write(vdp1Registers + 0x04U, 2, 1U));
     REQUIRE(mmio.video().consumeFrame(frame));
@@ -3610,7 +3613,7 @@ void consumesPcmCommandsAndPublishesPlaybackPosition() {
     const auto get = [&](std::uint32_t offset) { return sound.read(ram + offset, 1U); };
     const auto submit = [&] {
         put(0x4E0U, 1U, 0x80U);
-        sound.onSchedulerTick(state);
+        sound.onSchedulerTick();
         REQUIRE(get(0x4E0U) == 0U);
         REQUIRE(get(host) == 0U);
     };
@@ -3699,11 +3702,11 @@ void consumesPcmCommandsAndPublishesPlaybackPosition() {
     // Partial HLE must not acknowledge commands whose effects it cannot model.
     put(host, 4U, 0x08000000U);
     put(0x4E0U, 1U, 0x80U);
-    sound.onSchedulerTick(state);
+    sound.onSchedulerTick();
     REQUIRE(get(host) == 8U);
     put(0x404U, 4U, 0xFFFFFFFFU);
     put(0x4E0U, 1U, 0x80U);
-    sound.onSchedulerTick(state);
+    sound.onSchedulerTick();
     REQUIRE(get(host) == 8U);
     put(0x404U, 4U, host);
     put(host, 4U, 0x85001000U); // Muting output must not stop consumption.
@@ -3750,7 +3753,7 @@ void changesPcmParametersWithoutRestartingStream() {
     const auto get = [&](std::uint32_t offset) { return sound.read(ram + offset, 1U); };
     const auto submit = [&] {
         put(0x4E0U, 1U, 0x80U);
-        sound.onSchedulerTick(state);
+        sound.onSchedulerTick();
     };
     put(0x404U, 4U, host);
     for (std::uint32_t i = 0; i < 8U; ++i) put(0x10000U + i, 1U, i * 16U);

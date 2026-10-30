@@ -18,10 +18,9 @@ class MachineState;
 
 namespace saturn::platform {
 
-// Deterministic SCSP memory/register runtime plus the small SH-2/68K mailbox
-// used by the Rockman runtime. The mailbox itself lives in high work RAM;
-// the SCSP object owns only the peripheral window and services the mailbox at
-// scheduler block boundaries.
+// Deterministic SCSP memory/register runtime. Rockman's VDP1 field-sync
+// mailbox normally belongs to the guest VBlank callbacks; an explicit legacy
+// fallback remains available to harnesses that disable periodic VBlank.
 class ScspRuntime final {
 public:
     class DriverError final : public std::runtime_error {
@@ -53,7 +52,8 @@ public:
     };
     using AudioFrameSink = std::function<void(const AudioFrame&)>;
 
-    // Work-area mailbox observed by the code polling at 0x06010722.
+    // Guest-owned VDP1 field-sync words exposed for diagnostics. The SCSP
+    // runtime must not synthesize acknowledgements for these addresses.
     static constexpr core::Address kSequence = 0x0605E790U;
     static constexpr core::Address kRequest0 = 0x0605E792U;
     static constexpr core::Address kReady0 = 0x0605E796U;
@@ -119,11 +119,12 @@ public:
     [[nodiscard]] bool write(core::Address address, std::uint8_t width,
                               std::uint32_t value);
 
-    // Runs the deterministic 68K-side producer at a block boundary. A
-    // request is acknowledged once until the SH-2 either clears its request
-    // word or consumes the completion by clearing the corresponding ready
-    // word. The latter supports the game's level-held request protocol.
-    void onSchedulerTick(sir::MachineState& state);
+    // Services a pending PCM HLE command batch at a guest block boundary.
+    // With the 68000 backend enabled, the real sound CPU consumes the batch.
+    void onSchedulerTick();
+    // Compatibility service for headless harnesses with no periodic VBlank.
+    // Interactive gameplay must leave these words to the guest's field IRQs.
+    void serviceFramebufferMailboxFallback(sir::MachineState& state);
     // Advance the audio clock at VBlank. Deterministic mode emits one 60 Hz
     // block; a real-time frontend can instead follow elapsed host time. The
     // runtime exposes stereo samples without depending on a platform mixer.
@@ -134,7 +135,7 @@ public:
     // so a slow video frame does not stretch the music timeline.
     void setRealtimeAudioClock(bool enabled) noexcept;
     // Deterministic mode renders the frame's samples across the scheduler
-    // steps instead of one burst at VBlank, so SH-2 register writes, mailbox
+    // steps instead of one burst at VBlank, so SH-2 register writes, sound
     // commands and the sound CPU interleave within a frame. The scheduler
     // reports its step count per frame; zero keeps the former VBlank burst.
     void setAudioFrameBlocks(std::size_t blocksPerFrame) noexcept;

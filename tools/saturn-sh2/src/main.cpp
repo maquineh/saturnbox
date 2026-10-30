@@ -5334,7 +5334,7 @@ public:
                   << ", audio write errors: " << audioWriteErrors_
                   << ", audio truncated blocks: " << audioTruncatedFrames_
                   << ", audio refill frames: " << audioRefillFrames_
-                  << ", audio catch-up frames: " << audioCatchupFrames_
+                  << ", audio low-buffer frames: " << audioLowBufferFrames_
                   << ", 1 ms timer: " << (timerPeriodEnabled_ ? "yes" : "no") << '\n';
         frameTiming_.print("frame interval");
         paintTiming_.print("window paint");
@@ -5488,20 +5488,20 @@ private:
 
     void paceFrame() {
         auto now = Clock::now();
-        // Refill the initial audio reserve before imposing a display wait.
-        // This also lets the producer recover after a late frame while the
-        // device is still playing; no PCM is dropped, repeated or resampled.
+        // Allow a bounded burst to fill the initial audio reserve. Once audio
+        // starts, a low buffer count must not disable the frame clock: a fast
+        // renderer could otherwise advance the game without a speed limit.
         if (audioEnabled_) {
             std::lock_guard lock(audioMutex_);
             const auto queued = static_cast<std::size_t>(std::count_if(
                 audioBuffers_.begin(), audioBuffers_.end(),
                 [](const auto& buffer) { return buffer.busy; }));
-            if (!audioStarted_ || queued < kAudioPrebufferCount) {
-                if (audioStarted_) ++audioCatchupFrames_;
-                else ++audioRefillFrames_;
+            if (!audioStarted_ && audioRefillFrames_ < kAudioPrebufferCount) {
+                ++audioRefillFrames_;
                 nextFrame_ = now;
                 return;
             }
+            if (audioStarted_ && queued < kAudioPrebufferCount) ++audioLowBufferFrames_;
         }
         if (nextFrame_ == Clock::time_point{}) nextFrame_ = now;
         while (!quit_ && now < nextFrame_) {
@@ -5689,7 +5689,7 @@ private:
     bool helpVisible_{}, vulkan_{};
     bool timerPeriodEnabled_{};
     std::size_t audioRefillFrames_{};
-    std::size_t audioCatchupFrames_{};
+    std::size_t audioLowBufferFrames_{};
     std::size_t audioUnderruns_{}, audioWaits_{}, audioWriteErrors_{}, audioTruncatedFrames_{};
     std::size_t fpsFrames_{}, videoFrames_{}, nearBlackFrames_{};
     Clock::time_point fpsEpoch_{};
@@ -6462,6 +6462,7 @@ int boot(const Arguments& arguments) {
                            continueAfterExecuteDmp = arguments.continueAfterExecuteDmp](
                               const saturn::sir::BasicBlock& block,
                               saturn::sir::MachineState& state, std::size_t step) mutable {
+        if (block.address() == expectedEntry) bootServices.completeAipHandoff();
         // Scripted debug writes, used by the long automated routes to keep the
         // player alive. They run once per step and never change normal runs.
         while (pokeIndex < arguments.pokes.size() &&
@@ -6792,7 +6793,7 @@ int boot(const Arguments& arguments) {
         };
         const auto& timings = scheduler.stats();
         printProfile("SCSP block", timings.scspBlockTick);
-        printProfile("SCSP mailbox", timings.scspSchedulerTick);
+        printProfile("SCSP scheduler", timings.scspSchedulerTick);
         printProfile("MMIO scheduler", timings.mmioSchedulerTick);
         printProfile("SCSP VBlank", timings.scspVBlank);
         printProfile("video VBlank OUT", timings.videoVBlankOut);
@@ -7515,8 +7516,8 @@ int boot(const Arguments& arguments) {
               << " VCR0=" << saturn::sh2::formatAddress(state.read32BE(0xFFFFFFA0U))
               << '\n';
     const auto& scspStats = mmio.scsp().stats();
-    std::cout << "  SCSP mailbox: ticks=" << scspStats.schedulerTicks
-              << ", requests=" << scspStats.requests
+    std::cout << "  SCSP scheduler ticks=" << scspStats.schedulerTicks << '\n';
+    std::cout << "  X4 field-sync fallback: requests=" << scspStats.requests
               << ", completions=" << scspStats.completions
               << ", sequence=" << state.read16BE(saturn::platform::ScspRuntime::kSequence)
               << ", ready0=" << state.read16BE(saturn::platform::ScspRuntime::kReady0)

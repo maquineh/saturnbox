@@ -138,16 +138,20 @@ contador de frames permanece zero. Com `--vblank-blocks 10000`, o handler de
 VBlank monopoliza o recorte e a transferência não alcança o handoff. Com
 `--vblank-blocks 400000`, o handoff é alcançado, um primeiro `VideoFrame` é
 publicado, a conclusão de DMA0 é entregue pelo vetor `0x4B` e o fluxo atravessa
-`0x060303CC`. O polling em `0x06010722` aguardava o mailbox de sincronização
-em `0x0605E796`/`0x0605E798`; o runtime agora agenda o produtor do segundo
-processador, incrementa `0x0605E790` e publica as duas flags quando os pedidos
-em `0x0605E792`/`0x0605E79A` aparecem. A rotina também acessa TVMR/FBCR em
-`0x25D00000`/`0x25D00002`, portanto o rótulo histórico “SCSP/68K” não deve ser
-confundido com síntese SCSP: o caminho é uma sincronização de framebuffer/VDP1
-com mailbox compartilhado. Ainda não há comandos VDP1 reais no corpus (`PTMR=1`).
-O runtime já possui a semântica de término de desenho: quando um caminho futuro
-escrever `PTMR=1`, o scheduler publicará o fator SCU de sprite draw end (bit 13,
-vetor `0x4D`) no limite de bloco seguinte.
+`0x060303CC`. O polling em `0x06010722` aguarda as flags de sincronização do
+campo em `0x0605E796`/`0x0605E798`. A análise inicial atribuiu essas palavras a
+um produtor HLE no SCSP, mas as capturas de gameplay confirmaram que os
+callbacks do próprio jogo são os donos corretos: VBlank-IN (`0x06010D78`) grava
+`E796=1/E798=0` e VBlank-OUT (`0x06010DDC`) grava `E796=0/E798=1`. O serviço
+HLE anterior rodava em cada bloco e voltava a liberar a espera no mesmo campo,
+fazendo a lógica avançar duas ou três vezes por VBlank. Agora ele só permanece
+como fallback em harnesses que desativam VBlank periódico (`--vblank-blocks 0`);
+com relógio de campo ativo, as flags ficam sob controle dos callbacks do jogo.
+As palavras de pedido ficam em `0x0605E792`/`0x0605E79A`, e o contador em
+`0x0605E790`. A rotina também acessa TVMR/FBCR em `0x25D00000`/`0x25D00002`,
+por isso esse mailbox é sincronização compartilhada de framebuffer/VDP1, não
+síntese SCSP. O callback de draw-end está instalado no vetor `0x4D` em
+`0x06010EA8`.
 
 O estado mais recente foi medido com a imagem raw Mode 1/2448 completa
 (244.711 setores) e `--vblank-blocks 10000`. O fluxo de CD agora permanece

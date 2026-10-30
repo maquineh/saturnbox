@@ -37,6 +37,8 @@ int main(int argc, char** argv) {
     state.writeState(4U, 0x94U);
     state.writeState(5U, entry);
     services.executeService(*services.resolve(services.kAipSetSh2DispatchStubAddress), state);
+    // The snapshot belongs to gameplay, after the AIP released its RAM.
+    services.completeAipHandoff();
     if (!mmio.smpc().write(saturn::platform::SmpcRuntime::kComreg, 1U, 2U)) return 5;
     saturn::sh2::RuntimeBlockResolver resolver(*image, module, &state);
     const saturn::sir::BlockResolver resolve = [&](auto address) {

@@ -192,17 +192,17 @@ std::optional<sir::InterruptRequest> ScuEventScheduler::beforeBlock(
         raiseVblank();
     }
 
-    // The 68K-side SCSP producer is modeled as a deterministic mailbox
-    // service. It runs after the preceding block has had a chance to publish
-    // its request words and before the next block observes the ready flags.
+    // SCSP command servicing is independent from the game's VDP1 field-sync
+    // mailbox. Keep its audio/driver work at block boundaries, then enable the
+    // legacy mailbox approximation only in harnesses with no VBlank clock.
     if (profilingEnabled_) {
         auto& scspProfile = stats_.scspSchedulerTick;
         if (shouldSample(scspProfile)) {
             const auto start = ProfileClock::now();
-            mmio.scsp().onSchedulerTick(state);
+            mmio.scsp().onSchedulerTick();
             recordSample(scspProfile, start);
         } else {
-            mmio.scsp().onSchedulerTick(state);
+            mmio.scsp().onSchedulerTick();
         }
         auto& mmioProfile = stats_.mmioSchedulerTick;
         if (shouldSample(mmioProfile)) {
@@ -213,9 +213,11 @@ std::optional<sir::InterruptRequest> ScuEventScheduler::beforeBlock(
             mmio.onSchedulerTick(state);
         }
     } else {
-        mmio.scsp().onSchedulerTick(state);
+        mmio.scsp().onSchedulerTick();
         mmio.onSchedulerTick(state);
     }
+    if (vblankPeriodBlocks_ == 0U)
+        mmio.scsp().serviceFramebufferMailboxFallback(state);
 
     // The HLE renderer completes a PTMR=1 manual list synchronously and a
     // PTMR=2 automatic list at VBlank-OUT above. In both cases the SCU draw-end

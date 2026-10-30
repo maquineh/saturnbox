@@ -289,8 +289,7 @@ void realDriverWritesSlotsAndProducesPcm() {
     REQUIRE(sound.enableDriverCpu());
     loadLoopingPcmDriver(sound);
     REQUIRE(sound.write(Sound::kCommandStatus, 1, 0x80U));
-    saturn::sir::MachineState state;
-    sound.onSchedulerTick(state);
+    sound.onSchedulerTick();
     REQUIRE(sound.read(Sound::kCommandStatus, 1) == 0x80U); // HLE cannot acknowledge.
     REQUIRE(mmio.write(saturn::platform::SmpcRuntime::kComreg, 1, 6U));
     sound.onVBlank();

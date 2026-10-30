@@ -8,6 +8,7 @@ param(
     [string]$AudioOutput,
     [string]$ScspRequests,
     [switch]$ScspDriver,
+    [switch]$HleAudio,
     [switch]$CaptureOnBrightBars
 )
 
@@ -53,6 +54,9 @@ if ($Renderer -notin @('auto', 'cpu', 'vulkan')) {
 if ($VBlankBlocks -le 0) {
     throw 'VBlankBlocks must be positive.'
 }
+if ($ScspDriver -and $HleAudio) {
+    throw 'Choose either ScspDriver or HleAudio, not both.'
+}
 
 # This reproduces the verified title/menu prefix that reaches X's first-stage
 # scene, then gives port 1 to keyboard/XInput after the READY transition.
@@ -88,10 +92,15 @@ if (-not [string]::IsNullOrWhiteSpace($DebugSession)) {
 if ($CaptureOnBrightBars) {
     $runnerArguments += '--capture-on-bright-bars'
 }
-if ($ScspDriver) {
+if (-not $HleAudio) {
     $runnerArguments += '--scsp-driver'
-    # With the real driver it is worth keeping the audio and the sequence
-    # requests: F8 captures then document which cue each moment triggered.
+    Write-Output 'Sound: SCSP 68000 driver (use -HleAudio for the PCM-only fallback).'
+} else {
+    Write-Output 'Sound: PCM HLE (sequence-based voices and effects are unavailable).'
+}
+if ($ScspDriver) {
+    # Preserve explicit -ScspDriver's diagnostic recording behavior. Ordinary
+    # play does not accumulate an unbounded WAV and request trace in memory.
     $captureRoot = if (-not [string]::IsNullOrWhiteSpace($DebugSession)) {
         [System.IO.Path]::GetFullPath($DebugSession)
     } else {
@@ -104,9 +113,13 @@ if ($ScspDriver) {
     if ([string]::IsNullOrWhiteSpace($ScspRequests)) {
         $ScspRequests = Join-Path $captureRoot 'x4-requests.csv'
     }
+}
+if (-not [string]::IsNullOrWhiteSpace($AudioOutput)) {
     $runnerArguments += @('--audio-output', [System.IO.Path]::GetFullPath($AudioOutput))
-    $runnerArguments += @('--scsp-requests', [System.IO.Path]::GetFullPath($ScspRequests))
     Write-Output "Audio: $AudioOutput"
+}
+if (-not [string]::IsNullOrWhiteSpace($ScspRequests)) {
+    $runnerArguments += @('--scsp-requests', [System.IO.Path]::GetFullPath($ScspRequests))
     Write-Output "Sequence requests: $ScspRequests"
 }
 

@@ -3,7 +3,8 @@
 Foi acrescentado um caminho opcional para executar instruções reais do
 68000 com Musashi. O probe permite testar o driver isoladamente; o runtime
 também pode selecionar esse backend com `--scsp-driver`, usando o mesmo
-sintetizador PCM. O caminho HLE continua sendo o padrão.
+sintetizador PCM. O executável usa HLE por padrão; os launchers da fase e
+do debugger do X4 selecionam o driver 68000 por padrão.
 
 ```powershell
 cmake -S . -B build-scsp -DSATURNBOX_MUSASHI_68K=ON -DSATURNBOX_VULKAN=OFF
@@ -75,9 +76,18 @@ No modo novo, SMPC SNDON/SNDOFF controla o reset/execução do 68000. Ele usa
 os vetores da RAM e avança 256 ciclos por amostra, carregando excedentes de
 instrução. As escritas do driver chegam aos slots e timers; o áudio gerado
 vai ao frontend/WAV. O HLE **não** limpa o handshake dos pacotes nesse modo.
-O mailbox específico do jogo em WRAM ainda mantém seu serviço HLE anterior.
+O antigo mailbox de sincronização VDP1 em WRAM não é serviço SCSP: com VBlank
+periódico, as flags são atualizadas pelos callbacks do jogo; o fallback HLE só
+fica ativo quando o harness desativa VBlank automático.
 
-Para testar em uma build com `SATURNBOX_MUSASHI_68K=ON`:
+Para jogar com o driver em uma build com `SATURNBOX_MUSASHI_68K=ON`:
+
+```powershell
+.\tools\diagnostics\launch_x4_debug.ps1
+```
+
+O parâmetro `-HleAudio` seleciona o modo PCM simplificado. Para também gravar
+o áudio e os pedidos de sequências para diagnóstico, use:
 
 ```powershell
 .\tools\diagnostics\launch_x4_debug.ps1 -ScspDriver

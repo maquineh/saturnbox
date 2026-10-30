@@ -436,7 +436,8 @@ private:
                            std::uint16_t mapOffset,
                            std::uint16_t scrollX,
                            std::uint16_t scrollY,
-                           std::vector<std::uint8_t>* colorCalculationFlags = nullptr);
+                           std::vector<std::uint8_t>* colorCalculationFlags = nullptr,
+                           std::vector<std::uint8_t>* specialPriority = nullptr);
     void composeVdp2Cell(std::vector<std::uint32_t>& pixels, unsigned layer,
                          std::uint16_t characterControl, std::uint16_t patternControl,
                          std::uint16_t mapOffset, std::uint16_t mapA,

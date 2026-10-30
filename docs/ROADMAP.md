@@ -194,12 +194,13 @@ overclocking and does not fix execution that runs below the required PC speed.
 
 The current slice runs the requested order (SCU/CD DMA, real descriptor,
 VDP2 cell/tile, and `INTBACK` at VBlank). With `--vblank-blocks 400000`,
-Rockman publishes its first `VideoFrame` after handoff. The route crosses the
-dispatcher at `0x060303CC`, and a mailbox producer releases polling at
-`0x06010722` (`0x0605E796`/`0x0605E798`). The routine also programs VDP1
-TVMR/FBCR, so this point synchronizes the framebuffer with a shared mailbox.
-Real SCSP (RAM/registers `0x05A/0x05B`) is not cycle-accurate, but the runtime
-already produces a deterministic stereo PCM stream at each VBlank.
+Rockman publishes its first `VideoFrame` after handoff. In gameplay, the guest
+VBlank-IN/OUT callbacks own the framebuffer synchronization words polled at
+`0x06010722` (`0x0605E796`/`0x0605E798`). The earlier per-block HLE producer
+could release this wait several times inside one field; it is now restricted
+to harnesses that disable periodic VBlank. Real SCSP (RAM/registers
+`0x05A/0x05B`) is not cycle-accurate, but the runtime already produces a
+deterministic stereo PCM stream at each VBlank.
 
 The Win32 launcher turns the harness into a basic interactive window/audio
 session. A cross-platform backend and faster SIR/JIT execution are still needed

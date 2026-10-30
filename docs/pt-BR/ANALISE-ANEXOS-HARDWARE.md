@@ -86,8 +86,9 @@ para marcar páginas e enviar deltas, preservando a ordem de visibilidade.
   validada; o launcher faz pacing de apresentação, separado da semântica do
   SH-2. Manter essa separação evita misturar `sleep`/barreiras de threads ao
   interpretador de referência.
-- **Dois SH-2 e áudio:** há um serviço HLE para o mailbox do produtor
-  secundário, mas não uma segunda CPU SH-2 executando código concorrente. O
+- **Dois SH-2 e áudio:** as flags de campo do X4 são publicadas pelos callbacks
+  guest de VBlank; um fallback legado só atende harnesses sem VBlank periódico.
+  Ainda não há uma segunda CPU SH-2 executando código concorrente. O
   PCM observado tampouco confirma execução de música CD-DA ou emulação completa
   do SCSP/68K. Esses são marcos de compatibilidade futuros, não pré-requisitos
   para corrigir a composição atual do Rockman.

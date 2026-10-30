@@ -6,6 +6,7 @@ param(
     [string]$SessionDirectory,
     [string]$ExecutablePath,
     [switch]$ScspDriver,
+    [switch]$HleAudio,
     [switch]$CaptureOnBrightBars
 )
 
@@ -19,4 +20,4 @@ Write-Output 'Press F8 when a glitch appears. The game keeps running while captu
 & (Join-Path $PSScriptRoot 'launch_x4_stage.ps1') -DiscImage $DiscImage -Renderer $Renderer `
     -VBlankBlocks $VBlankBlocks -LiveAfterBlocks $LiveAfterBlocks `
     -DebugSession $SessionDirectory -ExecutablePath $ExecutablePath `
-    -ScspDriver:$ScspDriver -CaptureOnBrightBars:$CaptureOnBrightBars
+    -ScspDriver:$ScspDriver -HleAudio:$HleAudio -CaptureOnBrightBars:$CaptureOnBrightBars
