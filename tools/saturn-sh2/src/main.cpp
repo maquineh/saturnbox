@@ -6173,32 +6173,52 @@ int boot(const Arguments& arguments) {
                 liveDebug->recordFrame(std::move(snapshot), std::move(metadata));
             }
             if (arguments.captureOnBrightBars && liveDebug) {
+                // Only arm during live gameplay: the boot, logo and menu
+                // screens are full of white text and would flood the session.
+                const auto blockEstimate = mmio.video().frameCount() *
+                    static_cast<std::uint64_t>(arguments.vblankPeriodBlocks != 0U
+                        ? arguments.vblankPeriodBlocks : 1U);
+                const auto armed = !arguments.padLiveAfterBlocks ||
+                    blockEstimate >= *arguments.padLiveAfterBlocks;
                 const auto now = std::chrono::steady_clock::now();
-                if (now - lastBrightBarCheck >= std::chrono::milliseconds(700)) {
+                if (armed && now - lastBrightBarCheck >= std::chrono::milliseconds(900)) {
                     lastBrightBarCheck = now;
-                    // The artifact is a grid of short, near-white vertical runs
-                    // over the player sprite: count runs of 3..12 white pixels
-                    // per column and treat a dense cluster as the signature.
-                    unsigned shortRuns{};
-                    for (unsigned x = 0; x < saturn::platform::VideoRuntime::kFrameWidth; ++x) {
-                        unsigned run{};
-                        for (unsigned y = 0; y + 1 < frame.height; ++y) {
-                            const auto pixel = frame.pixels[static_cast<std::size_t>(y) *
-                                saturn::platform::VideoRuntime::kFrameWidth + x];
-                            const auto white = ((pixel >> 16U) & 0xFFU) > 232U &&
-                                ((pixel >> 8U) & 0xFFU) > 232U && (pixel & 0xFFU) > 232U;
-                            if (white) {
-                                ++run;
-                            } else {
-                                if (run >= 3U && run <= 12U) ++shortRuns;
-                                run = 0U;
+                    // Signature of the artifact: several 64x64 tiles that each
+                    // carry a handful of short (3..12 px) near-white vertical
+                    // runs, while the frame is not dominated by white.
+                    constexpr unsigned kTile = 64U;
+                    const auto width = saturn::platform::VideoRuntime::kFrameWidth;
+                    std::uint64_t whitePixels{};
+                    unsigned bestTileRuns{};
+                    for (unsigned ty = 0; ty + kTile <= frame.height; ty += kTile) {
+                        for (unsigned tx = 0; tx + kTile <= width; tx += kTile) {
+                            unsigned tileRuns{};
+                            for (unsigned x = tx; x < tx + kTile; ++x) {
+                                unsigned run{};
+                                for (unsigned y = ty; y < ty + kTile; ++y) {
+                                    const auto pixel = frame.pixels[
+                                        static_cast<std::size_t>(y) * width + x];
+                                    const auto white = ((pixel >> 16U) & 0xFFU) > 240U &&
+                                        ((pixel >> 8U) & 0xFFU) > 240U && (pixel & 0xFFU) > 240U;
+                                    if (white) {
+                                        ++run;
+                                        ++whitePixels;
+                                    } else {
+                                        if (run >= 3U && run <= 12U) ++tileRuns;
+                                        run = 0U;
+                                    }
+                                }
+                                if (run >= 3U && run <= 12U) ++tileRuns;
                             }
+                            bestTileRuns = std::max(bestTileRuns, tileRuns);
                         }
-                        if (run >= 3U && run <= 12U) ++shortRuns;
                     }
-                    if (shortRuns >= 45U) {
+                    const auto whiteFraction = static_cast<double>(whitePixels) /
+                        (static_cast<double>(width) * frame.height);
+                    if (bestTileRuns >= 6U && whiteFraction < 0.012) {
                         std::cout << "bright-bar candidate frame=" << frame.sequence
-                                  << " runs=" << shortRuns << std::endl;
+                                  << " tile-runs=" << bestTileRuns
+                                  << " white=" << whiteFraction << std::endl;
                         static_cast<void>(liveDebug->request("bright vertical bar artifact"));
                     }
                 }
