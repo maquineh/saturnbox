@@ -393,6 +393,23 @@ bool MmioInterceptor::write(core::Address address, std::uint8_t width,
                 video_.setVdp1MemoryWriteRegisters(registers, registersAvailable);
             }
         }
+        if (space == AddressSpace::Vdp2 && video_.vdp2MapWriteTraceEnabled() &&
+            mappedAddress >= VideoRuntime::kVdp2Base + 0x70000U &&
+            mappedAddress < VideoRuntime::kVdp2Base + 0x72000U) {
+            std::array<std::uint32_t, 8> registers{};
+            const bool registersAvailable = machineState_ != nullptr ||
+                                            !context_.state.empty();
+            for (std::uint8_t index = 0U; index < registers.size(); ++index) {
+                const auto slot = sh2::stateSlot(static_cast<sh2::Register>(index));
+                if (machineState_) {
+                    registers[index] = machineState_->readState(slot);
+                } else if (const auto valueAtSlot = context_.state.find(slot);
+                           valueAtSlot != context_.state.end()) {
+                    registers[index] = valueAtSlot->second;
+                }
+            }
+            video_.setVdp2MapWriteRegisters(registers, registersAvailable);
+        }
         static_cast<void>(video_.write(mappedAddress, width, value));
     } else if (space == AddressSpace::Scsp) {
         static_cast<void>(scsp_.write(mappedAddress, width, value));

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -13,6 +14,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace {
@@ -56,10 +58,8 @@ int main(int argc, char** argv) {
         std::optional<std::filesystem::path> dspWindowLogPath, readTracePath;
         std::optional<std::pair<std::uint32_t, std::uint32_t>> readTraceRange;
         std::optional<std::pair<unsigned, unsigned>> playSequence;
-        // Raw command packets (one string of hex bytes per packet), used to
-        // reproduce an in-game batch exactly, including the 05/14 parameter
-        // packets that accompany every 01 sequence start.
-        std::optional<std::vector<std::array<std::uint8_t, 5>>> injectPackets;
+        // Raw 16-byte command packets, placed into ordered mailbox slots.
+        std::optional<std::vector<std::array<std::uint8_t, 16>>> injectPackets;
         unsigned sequenceControl{};
         unsigned sequenceSlot{1};
         bool markLoaded{};
@@ -112,20 +112,29 @@ int main(int argc, char** argv) {
                     const auto token = text.substr(start, end == std::string::npos
                                                               ? std::string::npos : end - start);
                     if (!token.empty()) {
-                        std::array<std::uint8_t, 5> packet{};
-                        std::size_t written{};
-                        std::size_t at = 0;
-                        while (at < token.size() && written < packet.size()) {
-                            if (token[at] == '-' || token[at] == ':') { ++at; continue; }
-                            if (at + 1 >= token.size() + 0 && at + 1 > token.size())
-                                throw std::runtime_error("--inject-packets has an odd hex digit count");
-                            const auto byte = static_cast<std::uint8_t>(
-                                std::stoul(token.substr(at, 2), nullptr, 16));
-                            packet[written++] = byte;
-                            at += 2;
+                        std::string digits;
+                        digits.reserve(token.size());
+                        for (const char value : token) {
+                            if (value == '-' || value == ':') continue;
+                            digits.push_back(value);
                         }
-                        if (written < 2)
-                            throw std::runtime_error("--inject-packets needs at least a command and an argument");
+                        if ((digits.size() & 1U) != 0U)
+                            throw std::runtime_error("--inject-packets has an odd hex digit count");
+                        if (digits.size() > 32U)
+                            throw std::runtime_error("--inject-packets accepts at most 16 bytes per packet");
+                        std::array<std::uint8_t, 16> packet{};
+                        std::size_t written{};
+                        for (std::size_t at = 0; at < digits.size(); at += 2U) {
+                            unsigned byte{};
+                            const auto first = digits.data() + at;
+                            const auto last = first + 2U;
+                            const auto [parsed, error] = std::from_chars(first, last, byte, 16);
+                            if (error != std::errc{} || parsed != last || byte > 0xFFU)
+                                throw std::runtime_error("--inject-packets contains non-hex bytes");
+                            packet[written++] = static_cast<std::uint8_t>(byte);
+                        }
+                        if (written < 1U)
+                            throw std::runtime_error("--inject-packets needs at least a command byte");
                         injectPackets->push_back(packet);
                     }
                     if (end == std::string::npos) break;
@@ -395,9 +404,8 @@ int main(int argc, char** argv) {
                     if (host < 0x500U || host > ram.size() - 0x100U)
                         throw std::runtime_error("driver host command pointer is invalid");
                     std::fill_n(ram.begin() + host, 0x80U, 0U);
-                    // The game sends each 01 together with a 05 and a 14
-                    // carrying the per-channel parameters; replaying all of
-                    // them is what reproduces the in-game slot state.
+                    // Place each supplied 16-byte packet in order. Callers
+                    // can replay the exact mailbox command batch from a trace.
                     for (std::size_t index = 0; index < injectPackets->size(); ++index) {
                         const auto packet = host + (1U + index) * 16U;
                         const auto& bytes = (*injectPackets)[index];

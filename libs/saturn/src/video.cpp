@@ -26,6 +26,9 @@ constexpr std::size_t kVdp1TextureTraceBegin = 0x60000U;
 constexpr std::size_t kVdp1TextureTraceEnd = 0x60A80U;
 constexpr std::size_t kVdp1TextureTraceLimit = 4096U;
 constexpr std::size_t kVdp1RegisterTraceLimit = 4096U;
+constexpr std::size_t kVdp2Nbg0MapTraceBegin = 0x70000U;
+constexpr std::size_t kVdp2Nbg0MapTraceEnd = 0x72000U;
+constexpr std::size_t kVdp2Nbg0MapTraceLimit = 16384U;
 
 [[nodiscard]] std::uint32_t widthMask(std::uint8_t width) noexcept {
     return width == 1U ? 0xFFU : width == 2U ? 0xFFFFU : 0xFFFFFFFFU;
@@ -150,8 +153,20 @@ bool VideoRuntime::write(core::Address address, std::uint8_t width,
         return true;
     }
     if (address >= kVdp2Base && address < kVdp2Base + 0x80000U) {
-        recordWrite(vramWrites_, address - kVdp2Base, kVdp2VramSize);
-        writeBytes(vdp2Vram_, address - kVdp2Base, width, value);
+        const auto offset = static_cast<std::size_t>(address - kVdp2Base);
+        recordWrite(vramWrites_, offset, kVdp2VramSize);
+        if (vdp2MapWriteTraceEnabled_ &&
+            offset < kVdp2Nbg0MapTraceEnd &&
+            offset + width > kVdp2Nbg0MapTraceBegin) {
+            if (vdp2MapWriteHistory_.size() == kVdp2Nbg0MapTraceLimit) {
+                vdp2MapWriteHistory_.pop_front();
+            }
+            vdp2MapWriteHistory_.push_back({contextStep_, contextBlock_,
+                contextCaller_, vdp2MapWriteRegistersAvailable_,
+                vdp2MapWriteRegisters_, static_cast<std::uint32_t>(offset), width,
+                readBytes(vdp2Vram_, offset, width), value});
+        }
+        writeBytes(vdp2Vram_, offset, width, value);
         return true;
     }
     if (address >= kVdp2Cram && address < kVdp2Cram + kVdp2CramSize) {
@@ -275,6 +290,10 @@ VideoDebugSnapshot VideoRuntime::captureDebugSnapshot(bool includeMemory) const 
     snapshot.vdp1MemoryWriteHistory.assign(vdp1MemoryWriteHistory_.begin(),
                                            vdp1MemoryWriteHistory_.end());
     snapshot.vdp1CommandHistory = vdp1CommandHistory_;
+    if (includeMemory) {
+        snapshot.vdp2MapWriteHistory.assign(vdp2MapWriteHistory_.begin(),
+                                             vdp2MapWriteHistory_.end());
+    }
     snapshot.contextStep = contextStep_;
     snapshot.contextBlock = contextBlock_;
     snapshot.contextCaller = contextCaller_;
@@ -358,6 +377,15 @@ bool VideoRuntime::changeVdp1Framebuffer(std::uint64_t presentedFrame) {
         }
         vdp1DisplayBank_ = vdp1DrawBank_;
         vdp1DrawBank_ ^= 1U;
+        ++vdp1SwapCount_;
+        const auto displayedDrawSequence_ = vdp1BankDrawSequences_[vdp1DisplayBank_];
+        auto& presentedBankSequence =
+            vdp1PresentedBankDrawSequences_[vdp1DisplayBank_];
+        if (displayedDrawSequence_ != 0U &&
+            displayedDrawSequence_ != presentedBankSequence) {
+            presentedBankSequence = displayedDrawSequence_;
+            ++vdp1NewDrawPresentationCount_;
+        }
         vdp1SwapPending_ = false;
         compositionDirty_ = true;
         framePending_ = true;
@@ -735,6 +763,21 @@ void VideoRuntime::setVdp1MemoryWriteRegisters(
     vdp1MemoryWriteRegistersAvailable_ = available;
 }
 
+void VideoRuntime::setVdp2MapWriteTraceEnabled(bool enabled) noexcept {
+    vdp2MapWriteTraceEnabled_ = enabled;
+    if (!enabled) vdp2MapWriteHistory_.clear();
+}
+
+bool VideoRuntime::vdp2MapWriteTraceEnabled() const noexcept {
+    return vdp2MapWriteTraceEnabled_;
+}
+
+void VideoRuntime::setVdp2MapWriteRegisters(
+    const std::array<std::uint32_t, 8>& registers, bool available) noexcept {
+    vdp2MapWriteRegisters_ = registers;
+    vdp2MapWriteRegistersAvailable_ = available;
+}
+
 void VideoRuntime::setExecutionContext(std::size_t step, core::Address block,
                                        core::Address caller) noexcept {
     contextStep_ = step;
@@ -772,6 +815,10 @@ bool VideoRuntime::displayEnabled() const noexcept {
 
 const Vdp1CommandStats& VideoRuntime::vdp1CommandStats() const noexcept {
     return vdp1CommandStats_;
+}
+
+Vdp1Activity VideoRuntime::vdp1Activity() const noexcept {
+    return {vdp1DrawSequence_, vdp1SwapCount_, vdp1NewDrawPresentationCount_};
 }
 
 bool VideoRuntime::takeVdp1DrawEnd() noexcept {
@@ -872,6 +919,8 @@ void VideoRuntime::startVdp1Draw() {
     if (debugEventSink_) debugEventSink_("before-draw");
     vdp1Copr_ = 0U;
     executeVdp1Commands();
+    ++vdp1DrawSequence_;
+    vdp1BankDrawSequences_[vdp1DrawBank_] = vdp1DrawSequence_;
     // The VDP1 command-end factor is sampled by the host scheduler after the
     // current block, matching the non-preemptive event boundary used by DMA.
     vdp1DrawEndPending_ = true;
@@ -2607,8 +2656,16 @@ void VideoRuntime::drawVdp1Command(std::size_t offset, std::uint16_t control) {
                 const auto sourceY = y * sourceHeight / height;
                 const auto sy = flipY ? sourceHeight - sourceY - 1 : sourceY;
                 for (int x = minX; x < maxX; ++x) {
+                    const auto outputX = left + x;
+                    const auto outputY = top + y;
+                    // Mesh leaves alternate output pixels untouched. Reject
+                    // them before texture fetch and Gouraud interpolation; the
+                    // reference plot routine still checks this for lines and
+                    // other callers.
+                    if ((pmod & 0x0100U) != 0U && ((outputX + outputY) & 1) != 0)
+                        continue;
                     const auto sx = sourceColumns[x - minX];
-                    plotVdp1Pixel(left + x, top + y,
+                    plotVdp1Pixel(outputX, outputY,
                         sampleVdp1Texture(source, sourceWidth, sourceHeight, sx, sy,
                                           pmod, color), pmod,
                         (pmod & 4U) == 0U ? 0x4210U : interpolateShade(shades,
@@ -2710,6 +2767,9 @@ void VideoRuntime::drawVdp1Quad(const std::array<int, 8>& points, std::size_t so
     }
     for (int y = top; y <= bottom; ++y) {
         for (int x = left; x <= right; ++x) {
+            // Match plotVdp1Pixel's mesh test before the inverse-bilinear
+            // solve, which can require a square root and divisions.
+            if ((pmod & 0x0100U) != 0U && ((x + y) & 1) != 0) continue;
             const double px = x - points[0], py = y - points[1];
             const double linear = cross(px, py, dx, dy) - cross(bx, by, cx, cy);
             const double constant = cross(px, py, cx, cy);
@@ -2756,7 +2816,11 @@ void VideoRuntime::plotVdp1Pixel(int x, int y, std::uint16_t color, std::uint16_
     if ((pmod & 0x0100U) != 0U && ((x + y) & 1) != 0) return; // mesh
     auto& framebuffer = vdp1Framebuffers_[vdp1DrawBank_];
     const auto offset = (static_cast<std::size_t>(y) * kVdp1FramebufferWidth + x) * 2U;
-    const auto destination = static_cast<std::uint16_t>((framebuffer[offset] << 8U) | framebuffer[offset + 1U]);
+    if (offset + 1U >= framebuffer.size()) return;
+    const auto blendMode = static_cast<unsigned>(pmod & 3U);
+    const auto destination = blendMode == 1U || blendMode == 3U
+        ? static_cast<std::uint16_t>((framebuffer[offset] << 8U) | framebuffer[offset + 1U])
+        : std::uint16_t{};
     if ((color & 0x8000U) != 0U && (pmod & 4U) != 0U) {
         std::uint16_t shaded = 0x8000U;
         for (unsigned shift : {0U, 5U, 10U}) {
@@ -2767,7 +2831,7 @@ void VideoRuntime::plotVdp1Pixel(int x, int y, std::uint16_t color, std::uint16_
         color = shaded;
     }
     const auto half = [](std::uint16_t rgb) { return static_cast<std::uint16_t>((rgb >> 1U) & 0x3DEFU); };
-    switch (pmod & 3U) {
+    switch (blendMode) {
     case 1U: // shadow operates on an RGB destination
         if ((destination & 0x8000U) == 0U) return;
         color = static_cast<std::uint16_t>(0x8000U | half(destination));
@@ -2783,7 +2847,10 @@ void VideoRuntime::plotVdp1Pixel(int x, int y, std::uint16_t color, std::uint16_
     default: break;
     }
     if ((pmod & 0x8000U) != 0U) color |= 0x8000U;
-    writeFramebufferPixel(framebuffer, x, y, color);
+    // Coordinates and clipping were validated above, so store directly rather
+    // than repeating the same checks in writeFramebufferPixel for every pixel.
+    framebuffer[offset] = static_cast<std::uint8_t>(color >> 8U);
+    framebuffer[offset + 1U] = static_cast<std::uint8_t>(color);
 }
 
 void VideoRuntime::fillRectangle(int left, int top, int right, int bottom,

@@ -8,6 +8,8 @@ param(
     [string]$AudioOutput,
     [string]$ScspRequests,
     [switch]$ScspDriver,
+    [switch]$DebugCompact,
+    [switch]$CaptureConditionalFlow,
     [switch]$HleAudio,
     [switch]$CaptureOnBrightBars
 )
@@ -57,6 +59,12 @@ if ($VBlankBlocks -le 0) {
 if ($ScspDriver -and $HleAudio) {
     throw 'Choose either ScspDriver or HleAudio, not both.'
 }
+if ($DebugCompact -and [string]::IsNullOrWhiteSpace($DebugSession)) {
+    throw 'DebugCompact requires DebugSession.'
+}
+if ($CaptureConditionalFlow -and [string]::IsNullOrWhiteSpace($DebugSession)) {
+    throw 'CaptureConditionalFlow requires DebugSession.'
+}
 
 # This reproduces the verified title/menu prefix that reaches X's first-stage
 # scene, then gives port 1 to keyboard/XInput after the READY transition.
@@ -88,6 +96,12 @@ $runnerArguments = @(
 )
 if (-not [string]::IsNullOrWhiteSpace($DebugSession)) {
     $runnerArguments += @('--debug-session', [System.IO.Path]::GetFullPath($DebugSession))
+}
+if ($DebugCompact) {
+    $runnerArguments += '--debug-compact'
+}
+if ($CaptureConditionalFlow) {
+    $runnerArguments += '--capture-conditional-flow'
 }
 if ($CaptureOnBrightBars) {
     $runnerArguments += '--capture-on-bright-bars'

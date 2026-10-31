@@ -97,6 +97,14 @@ saturn-sh2 boot build/rockman/aip.bin `
 
 `boot` stops when the expected program entry is reached unless `--continue-after-execdmp` is specified. `--vblank-blocks N` schedules deterministic video/interrupt events after every N SIR blocks. `--frame-dir` saves PPM frames; `--frame-capture-after-blocks N` saves one selected frame with diagnostics. `--audio-output` writes PCM WAV output. On Windows, `launch` opens a native window and can use XInput gamepads.
 
+The Windows presentation window defaults to 1280×720 and keeps the Saturn
+frame's aspect ratio, adding black bars when needed. Use
+`--window-size 1920x1080` to choose another output size, `--integer-scale` to
+prefer whole-pixel enlargement when it fits, or `--smooth-scale` for HALFTONE
+filtering of video. These options change host presentation only: VDP1/VDP2 and
+frame captures stay at the game's native resolution. A wider window does not
+expand the game's camera or reveal off-screen stage content.
+
 Use `--interpreter` to repeat a boot scenario through the SIR interpreter for comparison. Diagnostic tracing can be expensive and should not be used to measure interactive performance.
 
 ## Saturn disc reader
@@ -124,6 +132,7 @@ cargo run --manifest-path rust/saturn-disc/Cargo.toml -- extract-aip GAME.CUE --
 - [Disc image format and boot metadata](docs/DISC-IMAGES.md)
 - [Rockman X4 validation corpus](docs/ROCKMAN-X4.md)
 - [Rockman X4 static recompilation](docs/ROCKMAN-X4-STATIC-RECOMPILATION.md)
+- [Generated native SH-2 module, 2026-10-31](docs/pt-BR/ROCKMAN-X4-AOT-20261031.md)
 - [Rockman X4 player-route checkpoint](docs/ROCKMAN-X4-PLAYER-TEST-CHECKPOINT.md)
 - [Title-map and video rendering investigation](docs/ROCKMAN-X4-TITLE-MAP-FIX.md)
 - [FMV and post-FMV checkpoint](docs/ROCKMAN-X4-FMV-CHECKPOINT.md)

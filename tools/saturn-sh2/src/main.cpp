@@ -89,6 +89,8 @@ struct Arguments {
     std::optional<std::filesystem::path> controlTraceOutput;
     std::optional<std::filesystem::path> x4PlayerSamplesOutput;
     std::optional<std::filesystem::path> debugSessionDirectory;
+    bool debugCompact{};
+    bool captureConditionalFlow{};
     std::optional<std::string> padSequence;
     // Debug-only scripted memory writes, applied once per scheduler step:
     // step, address, value, width. Used to keep the player alive in long
@@ -141,6 +143,9 @@ struct Arguments {
     bool traceForeground{};
     bool continueAfterExecuteDmp{};
     bool window{};
+    std::pair<unsigned, unsigned> windowSize{1280U, 720U};
+    bool integerScale{};
+    bool smoothScale{};
     bool audioLive{};
     bool scspDriver{};
     bool profile{};
@@ -494,6 +499,33 @@ constexpr saturn::core::Address kGfsTaskConfigEnd = kGfsTaskObjectAddress + 0x80
 constexpr saturn::core::Address kGfsParserObjectAddress = 0x0607C038U;
 constexpr saturn::core::Address kGfsParserTableEntryAddress = 0x0608021CU;
 constexpr saturn::core::Address kGfsParserSourceAddress = 0x25818000U;
+
+// Preserve the current execution boundary without enabling the larger trace probe.
+class ConditionalContextProbe final : public saturn::sir::MemoryInterceptor {
+public:
+    explicit ConditionalContextProbe(saturn::sir::MemoryInterceptor& downstream)
+        : downstream_(downstream) {}
+    void setExecutionContext(const saturn::sir::ExecutionContext& context) override {
+        caller_ = context.callerBlock;
+        downstream_.setExecutionContext(context);
+    }
+    [[nodiscard]] bool requiresStateSnapshot(saturn::core::Address address) const noexcept override {
+        return downstream_.requiresStateSnapshot(address);
+    }
+    [[nodiscard]] saturn::core::Address backingAddress(saturn::core::Address address) const noexcept override {
+        return downstream_.backingAddress(address);
+    }
+    [[nodiscard]] std::optional<std::uint32_t> read(saturn::core::Address address, std::uint8_t width) override {
+        return downstream_.read(address, width);
+    }
+    bool write(saturn::core::Address address, std::uint8_t width, std::uint32_t value) override {
+        return downstream_.write(address, width, value);
+    }
+    [[nodiscard]] saturn::core::Address caller() const noexcept { return caller_; }
+private:
+    saturn::sir::MemoryInterceptor& downstream_;
+    saturn::core::Address caller_{};
+};
 
 // Optional RAM probe used by launch --trace to verify that a CD FIFO sector
 // survives the SH-2 copy routine.  Device accesses are still delegated to the
@@ -2655,10 +2687,12 @@ void usage(std::ostream& stream) {
            << "      [--control-trace <events.csv>] (record scripted pad, SMPC and CD events)\n"
            << "      [--x4-player-samples <events.csv>] (sample X before each scripted pad change)\n"
            << "      [--debug-session <directory>] (F8 or capture.request saves a live diagnostic clip)\n"
+           << "      [--debug-compact] (omit VDP phase snapshots; attach SCSP registers and command packets)\n"
+           << "      [--capture-conditional-flow] (record branch/loader entries and auto-mark them)\n"
            << "      [--control-trace-from-step <count>] (requires --control-trace)\n"
            << "      [--control-trace-oreg2-only] (retain only OREG2 SMPC reads plus pad/CD events)\n"
-           << "      [--window] [--audio-live] [--renderer auto|cpu|vulkan] "
-         "[--renderer-check]\n"
+           << "      [--window] [--window-size WIDTHxHEIGHT] [--integer-scale] [--smooth-scale]\n"
+           << "      [--audio-live] [--renderer auto|cpu|vulkan] [--renderer-check]\n"
            << "      [--pad1 <buttons>] [--pad2 <buttons>] [--pad-after-blocks <count>]\n"
            << "      [--pad-sequence <step:buttons;...>] (use release to clear)\n"
            << "      [--pad-live-after-blocks <count>] (give port 1 to keyboard/XInput)\n"
@@ -2699,6 +2733,22 @@ std::optional<saturn::core::Address> parseAddress(std::string_view text) {
     return value;
 }
 
+std::optional<std::pair<unsigned, unsigned>> parseWindowSize(std::string_view text) {
+    const auto separator = text.find_first_of("xX");
+    if (separator == std::string_view::npos) return std::nullopt;
+    unsigned width{}, height{};
+    const auto [widthEnd, widthError] = std::from_chars(
+        text.data(), text.data() + separator, width);
+    const auto [heightEnd, heightError] = std::from_chars(
+        text.data() + separator + 1U, text.data() + text.size(), height);
+    if (widthError != std::errc{} || widthEnd != text.data() + separator ||
+        heightError != std::errc{} || heightEnd != text.data() + text.size() ||
+        width < 320U || width > 7680U || height < 224U || height > 4320U) {
+        return std::nullopt;
+    }
+    return std::pair<unsigned, unsigned>{width, height};
+}
+
 std::optional<Arguments> parseArguments(int argc, char** argv) {
     if (argc < 5) {
         return std::nullopt;
@@ -2718,6 +2768,7 @@ std::optional<Arguments> parseArguments(int argc, char** argv) {
              option == "--vdp2-map-trace" ||
              option == "--vdp2-map-read-trace" ||
              option == "--audio-output" || option == "--renderer" ||
+             option == "--window-size" ||
              option == "--aot-entry-output" ||
              option == "--aot-module-output" ||
               option == "--scsp-requests" ||
@@ -2795,6 +2846,11 @@ std::optional<Arguments> parseArguments(int argc, char** argv) {
             if (arguments.renderer != "auto" && arguments.renderer != "cpu" &&
                 arguments.renderer != "vulkan") return std::nullopt;
             arguments.rendererSpecified = true;
+        } else if (option == "--window-size") {
+            const auto size = parseWindowSize(argv[++index]);
+            if (!size) return std::nullopt;
+            arguments.windowSize = *size;
+            arguments.window = true;
         } else if (option == "--audio-output") {
             arguments.audioOutput = std::filesystem::path(argv[++index]);
         } else if (option == "--scsp-requests") {
@@ -3011,6 +3067,10 @@ std::optional<Arguments> parseArguments(int argc, char** argv) {
             }
         } else if (option == "--capture-on-bright-bars") {
             arguments.captureOnBrightBars = true;
+        } else if (option == "--debug-compact") {
+            arguments.debugCompact = true;
+        } else if (option == "--capture-conditional-flow") {
+            arguments.captureConditionalFlow = true;
         } else if (option == "--trace") {
             arguments.trace = true;
         } else if (option == "--profile") {
@@ -3025,6 +3085,10 @@ std::optional<Arguments> parseArguments(int argc, char** argv) {
             arguments.traceForeground = true;
         } else if (option == "--window") {
             arguments.window = true;
+        } else if (option == "--integer-scale") {
+            arguments.integerScale = true;
+        } else if (option == "--smooth-scale") {
+            arguments.smoothScale = true;
         } else if (option == "--audio-live") {
             arguments.audioLive = true;
         } else if (option == "--scsp-driver") {
@@ -3074,6 +3138,9 @@ std::optional<Arguments> parseArguments(int argc, char** argv) {
     if (arguments.frameCaptureAfterBlocks && !arguments.frameDirectory) return std::nullopt;
     if (arguments.debugSessionDirectory &&
         (arguments.command != "boot" && arguments.command != "launch")) return std::nullopt;
+    if (arguments.debugCompact && !arguments.debugSessionDirectory) return std::nullopt;
+    if (arguments.captureConditionalFlow && !arguments.debugSessionDirectory)
+        return std::nullopt;
     if (arguments.scspDriver && arguments.command != "boot" && arguments.command != "launch")
         return std::nullopt;
     if (arguments.traceCdSectors && !arguments.frameDirectory) return std::nullopt;
@@ -5101,6 +5168,14 @@ struct SlaveExecutionFailure final {
 // the window/audio callbacks run on the same thread; waveOut only calls back
 // to mark completed buffers, so no emulation state is touched from the audio
 // callback thread.
+struct RealtimeVblankTelemetry {
+    std::uint64_t generated{};
+    std::uint64_t delivered{};
+    std::uint64_t coalesced{};
+    std::uint64_t dropped{};
+    std::uint64_t gameCallbacks{};
+};
+
 class RealtimeFrontend final {
 public:
     RealtimeFrontend() = default;
@@ -5109,9 +5184,15 @@ public:
 
     ~RealtimeFrontend() { shutdown(); }
 
-    [[nodiscard]] bool initialize(bool enableWindow, bool enableAudio) {
+    [[nodiscard]] bool initialize(bool enableWindow, bool enableAudio,
+                                  unsigned windowWidth, unsigned windowHeight,
+                                  bool integerScale, bool smoothScale) {
         windowEnabled_ = enableWindow;
         audioEnabled_ = enableAudio;
+        windowWidth_ = windowWidth;
+        windowHeight_ = windowHeight;
+        integerScale_ = integerScale;
+        smoothScale_ = smoothScale;
 #if defined(_WIN32)
         if (windowEnabled_ && !openWindow()) {
             shutdown();
@@ -5131,6 +5212,10 @@ public:
 #else
         static_cast<void>(enableWindow);
         static_cast<void>(enableAudio);
+        static_cast<void>(windowWidth);
+        static_cast<void>(windowHeight);
+        static_cast<void>(integerScale);
+        static_cast<void>(smoothScale);
         return false;
 #endif
     }
@@ -5190,7 +5275,9 @@ public:
 #endif
     }
 
-    void onVideoFrame(const saturn::platform::VideoFrame& frame) {
+    void onVideoFrame(const saturn::platform::VideoFrame& frame,
+                      saturn::platform::Vdp1Activity activity,
+                      const RealtimeVblankTelemetry& vblank) {
 #if defined(_WIN32)
         if (!windowEnabled_ || hwnd_ == nullptr || quit_) return;
         input_.advanceFrame();
@@ -5222,6 +5309,23 @@ public:
         UpdateWindow(hwnd_);
         ++fpsFrames_;
         ++videoFrames_;
+        fpsVdp1Draws_ += activity.draws - lastVdp1Draws_;
+        fpsVdp1Swaps_ += activity.swaps - lastVdp1Swaps_;
+        fpsVdp1NewDrawsPresented_ +=
+            activity.newDrawsPresented - lastVdp1NewDrawsPresented_;
+        fpsVblankGenerated_ += vblank.generated - lastVblankGenerated_;
+        fpsVblankDelivered_ += vblank.delivered - lastVblankDelivered_;
+        fpsVblankCoalesced_ += vblank.coalesced - lastVblankCoalesced_;
+        fpsVblankDropped_ += vblank.dropped - lastVblankDropped_;
+        fpsGameVblankCallbacks_ += vblank.gameCallbacks - lastGameVblankCallbacks_;
+        lastVdp1Draws_ = activity.draws;
+        lastVdp1Swaps_ = activity.swaps;
+        lastVdp1NewDrawsPresented_ = activity.newDrawsPresented;
+        lastVblankGenerated_ = vblank.generated;
+        lastVblankDelivered_ = vblank.delivered;
+        lastVblankCoalesced_ = vblank.coalesced;
+        lastVblankDropped_ = vblank.dropped;
+        lastGameVblankCallbacks_ = vblank.gameCallbacks;
         const auto now = Clock::now();
         paintTiming_.record(now - paintStart);
         if (lastPresentation_ != Clock::time_point{}) {
@@ -5232,8 +5336,19 @@ public:
         if (elapsed >= 1.0) {
             std::wostringstream title;
             title << L"SaturnBox - Rockman X4 | " << std::fixed
-                  << std::setprecision(1) << static_cast<double>(fpsFrames_) / elapsed << L" FPS | "
+                  << std::setprecision(1) << static_cast<double>(fpsFrames_) / elapsed
+                  << L" VBlank OUT/s | "
                   << (vulkan_ ? L"VDP1 Vulkan" : L"VDP1 CPU")
+                  << L" draws/s " << static_cast<double>(fpsVdp1Draws_) / elapsed
+                  << L" swaps/s " << static_cast<double>(fpsVdp1Swaps_) / elapsed
+                  << L" new draws shown/s "
+                  << static_cast<double>(fpsVdp1NewDrawsPresented_) / elapsed
+                  << L" | IN gen/del/coalesced/drop/callback/s "
+                  << static_cast<double>(fpsVblankGenerated_) / elapsed << L'/'
+                  << static_cast<double>(fpsVblankDelivered_) / elapsed << L'/'
+                  << static_cast<double>(fpsVblankCoalesced_) / elapsed << L'/'
+                  << static_cast<double>(fpsVblankDropped_) / elapsed << L'/'
+                  << static_cast<double>(fpsGameVblankCallbacks_) / elapsed
                   << L" | black frames " << nearBlackFrames_;
             if (audioEnabled_) {
                 std::lock_guard lock(audioMutex_);
@@ -5245,9 +5360,19 @@ public:
             SetWindowTextW(hwnd_, title.str().c_str());
             fpsEpoch_ = now;
             fpsFrames_ = 0U;
+            fpsVdp1Draws_ = 0U;
+            fpsVdp1Swaps_ = 0U;
+            fpsVdp1NewDrawsPresented_ = 0U;
+            fpsVblankGenerated_ = 0U;
+            fpsVblankDelivered_ = 0U;
+            fpsVblankCoalesced_ = 0U;
+            fpsVblankDropped_ = 0U;
+            fpsGameVblankCallbacks_ = 0U;
         }
 #else
         static_cast<void>(frame);
+        static_cast<void>(activity);
+        static_cast<void>(vblank);
 #endif
     }
 
@@ -5414,7 +5539,8 @@ private:
             return false;
         }
 
-        RECT rectangle{0, 0, 960, 672};
+        RECT rectangle{0, 0, static_cast<LONG>(windowWidth_),
+                       static_cast<LONG>(windowHeight_)};
         if (AdjustWindowRect(&rectangle, WS_OVERLAPPEDWINDOW, FALSE) == 0) return false;
         hwnd_ = CreateWindowExW(0, kClassName, L"SaturnBox - Rockman X4",
                                 WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
@@ -5536,6 +5662,14 @@ private:
             drawWidth = static_cast<LONG>(
                 static_cast<std::int64_t>(height) * frameWidth_ / frameHeight_);
         }
+        if (integerScale_) {
+            const auto scale = std::min(width / static_cast<int>(frameWidth_),
+                                        height / static_cast<int>(frameHeight_));
+            if (scale >= 1) {
+                drawWidth = static_cast<LONG>(frameWidth_ * static_cast<unsigned>(scale));
+                drawHeight = static_cast<LONG>(frameHeight_ * static_cast<unsigned>(scale));
+            }
+        }
         const auto buffered = ensureBackBuffer(deviceContext, width, height);
         const auto paintContext = buffered ? backBufferDc_ : deviceContext;
         FillRect(paintContext, &client, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
@@ -5546,10 +5680,14 @@ private:
         bitmapInfo.bmiHeader.biPlanes = 1U;
         bitmapInfo.bmiHeader.biBitCount = 32U;
         bitmapInfo.bmiHeader.biCompression = BI_RGB;
+        const auto previousStretchMode = SetStretchBltMode(
+            paintContext, smoothScale_ ? HALFTONE : COLORONCOLOR);
+        if (smoothScale_) SetBrushOrgEx(paintContext, 0, 0, nullptr);
         StretchDIBits(paintContext, (width - drawWidth) / 2, (height - drawHeight) / 2,
                       drawWidth, drawHeight, 0, 0,
                       static_cast<int>(frameWidth_), static_cast<int>(frameHeight_),
                       framePixels_.data(), &bitmapInfo, DIB_RGB_COLORS, SRCCOPY);
+        if (previousStretchMode != 0) SetStretchBltMode(paintContext, previousStretchMode);
         if (helpVisible_) {
             RECT panel{12, 12, std::min(width - 12, 660L), 166};
             FillRect(paintContext, &panel, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
@@ -5691,7 +5829,13 @@ private:
     std::size_t audioRefillFrames_{};
     std::size_t audioLowBufferFrames_{};
     std::size_t audioUnderruns_{}, audioWaits_{}, audioWriteErrors_{}, audioTruncatedFrames_{};
-    std::size_t fpsFrames_{}, videoFrames_{}, nearBlackFrames_{};
+    std::size_t fpsFrames_{}, fpsVdp1Draws_{}, fpsVdp1Swaps_{},
+        fpsVdp1NewDrawsPresented_{}, fpsVblankGenerated_{}, fpsVblankDelivered_{},
+        fpsVblankCoalesced_{}, fpsVblankDropped_{}, fpsGameVblankCallbacks_{},
+        videoFrames_{}, nearBlackFrames_{};
+    std::uint64_t lastVdp1Draws_{}, lastVdp1Swaps_{}, lastVdp1NewDrawsPresented_{};
+    std::uint64_t lastVblankGenerated_{}, lastVblankDelivered_{},
+        lastVblankCoalesced_{}, lastVblankDropped_{}, lastGameVblankCallbacks_{};
     Clock::time_point fpsEpoch_{};
     Clock::time_point sessionStart_{};
     Clock::time_point nextFrame_{};
@@ -5703,6 +5847,8 @@ private:
     bool quit_{};
     bool debugCaptureRequested_{};
     bool debugEnabled_{};
+    unsigned windowWidth_{1280U}, windowHeight_{720U};
+    bool integerScale_{}, smoothScale_{};
 #if defined(_WIN32)
     std::uint32_t frameWidth_{320U};
     std::uint32_t frameHeight_{224U};
@@ -6001,7 +6147,9 @@ int boot(const Arguments& arguments) {
     std::optional<RealtimeFrontend> realtime;
     if (arguments.window || arguments.audioLive) {
         realtime.emplace();
-        if (!realtime->initialize(arguments.window, arguments.audioLive)) {
+        if (!realtime->initialize(arguments.window, arguments.audioLive,
+                                  arguments.windowSize.first, arguments.windowSize.second,
+                                  arguments.integerScale, arguments.smoothScale)) {
             std::cerr << "error: realtime frontend is unavailable or could not be initialized\n";
             return 1;
         }
@@ -6047,6 +6195,7 @@ int boot(const Arguments& arguments) {
         }
         mmio.video().setVdp1CommandTraceEnabled(true);
         mmio.video().setVdp1MemoryWriteTraceEnabled(true);
+        mmio.video().setVdp2MapWriteTraceEnabled(true);
         if (realtimeWindow) realtimeWindow->setDebugEnabled(true);
         std::ofstream latest(*arguments.debugSessionDirectory / "latest-session.txt");
         latest << liveDebug->directory().string() << '\n';
@@ -6056,6 +6205,8 @@ int boot(const Arguments& arguments) {
                << "renderer=" << (vdp1Renderer ? "vulkan" : "cpu") << '\n'
                << "vblank_blocks=" << arguments.vblankPeriodBlocks << '\n'
                << "scsp_driver=" << arguments.scspDriver << '\n'
+               << "debug_compact=" << arguments.debugCompact << '\n'
+               << "capture_conditional_flow=" << arguments.captureConditionalFlow << '\n'
                << "aip=" << arguments.input.string() << '\n'
                << "program=" << (arguments.program ? arguments.program->string() : "") << '\n'
                << "disc=" << (arguments.discImage ? arguments.discImage->string() : "") << '\n'
@@ -6095,10 +6246,14 @@ int boot(const Arguments& arguments) {
                   << ";audio_truncated=" << counters[3] << ";dark_frames=" << counters[4]
                   << ";frontend_frames=" << counters[5];
         }
+        stats << ";scsp_scheduler_steps=" << sound.schedulerSteps
+              << ";sound_requests=" << sound.soundRequests
+              << ";sound_request_batches=" << sound.soundRequestBatches
+              << ";sound_requests_recorded=" << sound.lastSoundRequests.size();
         metadata.scspStats = stats.str();
         return metadata;
     };
-    if (liveDebug) mmio.video().setDebugEventSink([&](std::string_view phase) {
+    if (liveDebug && !arguments.debugCompact) mmio.video().setDebugEventSink([&](std::string_view phase) {
         if (!liveDebug->isCapturing()) return;
         auto snapshot = mmio.video().captureDebugSnapshot(true);
         auto metadata = debugMetadata();
@@ -6107,6 +6262,7 @@ int boot(const Arguments& arguments) {
         metadata.caller = snapshot.contextCaller;
         liveDebug->recordPhase(phase, std::move(snapshot), std::move(metadata));
     });
+    RealtimeVblankTelemetry realtimeVblank;
     if (arguments.frameDirectory || realtimeWindow != nullptr || liveDebug || arguments.vdp2Probe) {
         const auto directory = arguments.frameDirectory ? *arguments.frameDirectory
                                                          : std::filesystem::path{};
@@ -6119,6 +6275,7 @@ int boot(const Arguments& arguments) {
         }
         auto lastBrightBarCheck = std::chrono::steady_clock::now();
     mmio.video().setFrameSink([directory, realtimeWindow, arguments,
+                                   &realtimeVblank,
                                    &lastBrightBarCheck,
                                    &liveDebug, &debugMetadata, &debugAttachNextFrame,
                                    &nextDebugPoll, &state, &mmio,
@@ -6128,7 +6285,9 @@ int boot(const Arguments& arguments) {
                                    &frameCaptureArmedAt,
                                    previous = saturn::platform::VideoFrame{}](
                                       const saturn::platform::VideoFrame& frame) mutable {
-            if (realtimeWindow != nullptr) realtimeWindow->onVideoFrame(frame);
+            if (realtimeWindow != nullptr)
+                realtimeWindow->onVideoFrame(frame, mmio.video().vdp1Activity(),
+                                             realtimeVblank);
             if (liveDebug) {
                 const auto now = std::chrono::steady_clock::now();
                 const bool hotkey = realtimeWindow && realtimeWindow->takeDebugCaptureRequest();
@@ -6162,12 +6321,133 @@ int boot(const Arguments& arguments) {
                         soundRam[offset] = static_cast<std::uint8_t>(mmio.scsp().read(
                             static_cast<saturn::core::Address>(saturn::platform::ScspRuntime::kRamBase + offset), 1U).value_or(0U));
                     metadata.attachments.push_back({"scsp_ram.bin", std::move(soundRam)});
+                    auto soundRegisters = mmio.scsp().captureDebugRegisterSnapshot();
+                    metadata.attachments.push_back({"scsp_registers.bin", std::move(soundRegisters)});
+                    std::ostringstream soundRequests;
+                    soundRequests << "scheduler_tick,batch_id,packet_offset,command,control,bank,sequence,packet_hex\n";
+                    for (const auto& request : mmio.scsp().stats().lastSoundRequests) {
+                        soundRequests << request.schedulerTick << ','
+                                      << request.batchId << ',' << request.packetOffset << ','
+                                      << static_cast<unsigned>(request.command) << ','
+                                      << static_cast<unsigned>(request.control) << ','
+                                      << static_cast<unsigned>(request.bank) << ','
+                                      << static_cast<unsigned>(request.sequence) << ',';
+                        for (const auto byte : request.packet)
+                            soundRequests << std::hex << std::setw(2) << std::setfill('0')
+                                          << static_cast<unsigned>(byte);
+                        soundRequests << std::dec << '\n';
+                    }
+                    const auto soundRequestText = soundRequests.str();
+                    metadata.attachments.push_back({"scsp_requests.csv",
+                        {soundRequestText.begin(), soundRequestText.end()}});
+                    const auto& sound = mmio.scsp().stats();
+                    std::ostringstream soundContext;
+                    soundContext << "scsp_scheduler_steps=" << sound.schedulerSteps << '\n'
+                                 << "sound_requests_total=" << sound.soundRequests << '\n'
+                                 << "sound_request_batches=" << sound.soundRequestBatches << '\n'
+                                 << "sound_requests_recorded=" << sound.lastSoundRequests.size() << '\n'
+                                 << "sound_request_ring_capacity="
+                                 << saturn::platform::ScspRuntime::Stats::kMaxSoundRequests << '\n'
+                                 << "published_b3s2_ring_count=" << sound.publishedB3S2Count << '\n'
+                                 << "published_b3s2_overwrites=" << sound.publishedB3S2Overwrites << '\n';
+                    const auto soundContextText = soundContext.str();
+                    metadata.attachments.push_back({"scsp_capture_context.txt",
+                        {soundContextText.begin(), soundContextText.end()}});
+                    if (sound.publishedB3S2Count != 0U) {
+                        constexpr auto kPublishCapacity =
+                            saturn::platform::ScspRuntime::Stats::kMaxPublishedB3S2;
+                        std::vector<std::uint8_t> publishedRegisters;
+                        std::vector<std::uint8_t> publishedMailboxes;
+                        std::vector<std::uint8_t> publishedPcm;
+                        publishedRegisters.reserve(sound.publishedB3S2Count * 0x1000U);
+                        publishedMailboxes.reserve(sound.publishedB3S2Count *
+                            saturn::platform::ScspRuntime::Stats::kMailboxBytes);
+                        publishedPcm.reserve(sound.publishedB3S2Count *
+                            saturn::platform::ScspRuntime::Stats::kTargetPcmBytes);
+                        std::ostringstream publishedCsv;
+                        publishedCsv << "ring_order,scheduler_tick,batch_id,packet_offset,"
+                                        "mailbox_pointer_offset,driver_cycles,driver_pc,"
+                                        "mailbox_status0,mailbox_status1,error_bitmap_hex,"
+                                        "packet_hex\n";
+                        const auto first = (sound.publishedB3S2Next + kPublishCapacity -
+                                            sound.publishedB3S2Count) % kPublishCapacity;
+                        for (std::size_t order = 0; order < sound.publishedB3S2Count; ++order) {
+                            const auto ringIndex = (first + order) % kPublishCapacity;
+                            const auto& published = sound.publishedB3S2[ringIndex];
+                            publishedCsv << order << ',' << published.schedulerTick << ','
+                                         << published.batchId << ',' << published.packetOffset
+                                         << ",0x" << std::hex << published.mailboxPointer
+                                         << std::dec << ',' << published.driverCycles << ",0x"
+                                         << std::hex << published.driverPc << std::dec << ','
+                                         << static_cast<unsigned>(published.mailboxStatus0) << ','
+                                         << static_cast<unsigned>(published.mailboxStatus1) << ',';
+                            for (const auto byte : published.errorBitmap)
+                                publishedCsv << std::hex << std::setw(2) << std::setfill('0')
+                                             << static_cast<unsigned>(byte);
+                            publishedCsv << ',';
+                            for (const auto byte : published.packet)
+                                publishedCsv << std::hex << std::setw(2) << std::setfill('0')
+                                             << static_cast<unsigned>(byte);
+                            publishedCsv << std::dec << std::setfill(' ') << '\n';
+                            publishedRegisters.insert(publishedRegisters.end(),
+                                published.registers.begin(), published.registers.end());
+                            publishedMailboxes.insert(publishedMailboxes.end(),
+                                published.mailbox.begin(), published.mailbox.end());
+                            publishedPcm.insert(publishedPcm.end(),
+                                published.targetPcm.begin(), published.targetPcm.end());
+                        }
+                        const auto publishedCsvText = publishedCsv.str();
+                        metadata.attachments.push_back({"scsp_publish_b3_s2.csv",
+                            {publishedCsvText.begin(), publishedCsvText.end()}});
+                        metadata.attachments.push_back({"scsp_publish_b3_s2_registers.bin",
+                            std::move(publishedRegisters)});
+                        metadata.attachments.push_back({"scsp_publish_b3_s2_mailboxes.bin",
+                            std::move(publishedMailboxes)});
+                        metadata.attachments.push_back({"scsp_publish_b3_s2_pcm.bin",
+                            std::move(publishedPcm)});
+                    }
+                    std::ostringstream conditionalState;
+                    conditionalState << "address,value_hex\n";
+                    for (const auto address : {0x0605457CU, 0x0605457FU})
+                        conditionalState << "0x" << std::hex << address << ",0x"
+                                         << std::setw(2) << std::setfill('0')
+                                         << static_cast<unsigned>(state.readRaw8(address)) << '\n';
+                    const auto conditionalStateText = conditionalState.str();
+                    metadata.attachments.push_back({"conditional_state_bytes.csv",
+                        {conditionalStateText.begin(), conditionalStateText.end()}});
                     std::ostringstream cpuSlots;
                     cpuSlots << "slot,value_hex\n";
                     for (const auto& [slot, value] : state.stateSlots())
                         cpuSlots << std::dec << slot << ",0x" << std::hex << value << '\n';
                     const auto slotText = cpuSlots.str();
                     metadata.attachments.push_back({"cpu_slots.csv", {slotText.begin(), slotText.end()}});
+                    std::ostringstream mapDma;
+                    mapDma << "channel,source,destination,first_source,first_destination,"
+                              "last_source,last_destination,bytes,mode,add,step,block,caller,"
+                              "from_cd,complete\n";
+                    constexpr std::uint64_t kNbg0MapPhysicalBegin = 0x05E70000U;
+                    constexpr std::uint64_t kNbg0MapPhysicalEnd = 0x05E72000U;
+                    for (const auto& transfer : mmio.scuDma().transferHistory()) {
+                        const auto destination = transfer.destination & 0x1FFFFFFFU;
+                        const auto transferEnd = static_cast<std::uint64_t>(destination) +
+                            transfer.bytes;
+                        if (transferEnd <= kNbg0MapPhysicalBegin ||
+                            destination >= kNbg0MapPhysicalEnd) continue;
+                        mapDma << transfer.channel << ",0x" << std::hex
+                               << transfer.source << ",0x" << transfer.destination
+                               << ",0x" << transfer.firstSource << ",0x"
+                               << transfer.firstDestination << ",0x"
+                               << transfer.lastSource << ",0x" << transfer.lastDestination
+                               << std::dec << ',' << transfer.bytes << ",0x" << std::hex
+                               << transfer.mode << ",0x" << transfer.add << std::dec << ','
+                               << transfer.contextStep << ",0x" << std::hex
+                               << transfer.contextBlock << ",0x" << transfer.contextCaller
+                               << std::dec << ',' << (transfer.fromCd ? 1 : 0) << ','
+                               << (transfer.complete ? 1 : 0) << '\n';
+                    }
+                    const auto mapDmaText = mapDma.str();
+                    metadata.attachments.push_back({"vdp2_map_dma.csv",
+                        {mapDmaText.begin(), mapDmaText.end()}});
                     debugAttachNextFrame = false;
                 }
                 liveDebug->recordFrame(std::move(snapshot), std::move(metadata));
@@ -6361,6 +6641,26 @@ int boot(const Arguments& arguments) {
     } else {
         state.setMemoryInterceptor(&bootServices);
     }
+    std::optional<ConditionalContextProbe> conditionalContext;
+    std::ofstream conditionalFlow;
+    std::array<bool, 7> conditionalMarked{};
+    if (arguments.captureConditionalFlow) {
+        conditionalContext.emplace(*state.memoryInterceptor());
+        state.setMemoryInterceptor(&*conditionalContext);
+        conditionalFlow.open(liveDebug->directory() / "conditional_flow.csv", std::ios::out | std::ios::trunc);
+        if (!conditionalFlow) {
+            std::cerr << "error: cannot open conditional flow CSV\n";
+            return 1;
+        }
+        conditionalFlow << "step,frame,pc,block,caller,pr,stage,substage,byte40,byte43";
+        for (unsigned i = 0; i < 16U; ++i) conditionalFlow << ",r" << i;
+        conditionalFlow << ",r4_string,queue_0605e7b4_to_0605e7f6_hex,auto_mark\n";
+        conditionalFlow.flush();
+        if (!conditionalFlow) {
+            std::cerr << "error: cannot write conditional flow CSV header\n";
+            return 1;
+        }
+    }
     std::optional<saturn::platform::CdRuntime::DmaTransfer> resourceDma;
     if (arguments.resourcePath && arguments.resourceBase) {
         resourceDma = mmio.cd().dmaReadFile(arguments.resourcePath->string(),
@@ -6444,6 +6744,8 @@ int boot(const Arguments& arguments) {
     options.beforeBlock = [&bootServices, &acceleratedByteFills, &acceleratedWordFills,
                            &acceleratedWordCopies, &realtime, &memoryProbe, expectedEntry,
                            &mmio, &arguments, &watchDirectory, &padSequenceEvents, &x4PlayerSamplesFile,
+                           &realtimeVblank,
+                           &conditionalContext, &conditionalFlow, &conditionalMarked, &liveDebug,
                            &pokeIndex, &watchNextStep,
                            &x4PlayerSampleCount, &x4PlayerSampleWriteFailure,
                            captureX4PlayerSamples = arguments.x4PlayerSamplesOutput.has_value(),
@@ -6462,6 +6764,53 @@ int boot(const Arguments& arguments) {
                            continueAfterExecuteDmp = arguments.continueAfterExecuteDmp](
                               const saturn::sir::BasicBlock& block,
                               saturn::sir::MachineState& state, std::size_t step) mutable {
+        if (block.address() == 0x06010D78U) ++realtimeVblank.gameCallbacks;
+        if (conditionalContext) {
+            constexpr std::array<saturn::core::Address, 7> checkpoints{
+                0x0601D3EEU, 0x0601D416U, 0x0601D426U, 0x0601D488U,
+                0x0601C920U, 0x0601CE2AU, 0x0601C5CEU};
+            const auto found = std::find(checkpoints.begin(), checkpoints.end(), block.address());
+            if (found != checkpoints.end()) {
+                const auto index = static_cast<std::size_t>(found - checkpoints.begin());
+                const auto reg = [&](saturn::sh2::Register r) { return state.readState(saturn::sh2::stateSlot(r)); };
+                const auto r4 = reg(saturn::sh2::Register::R4);
+                bool marked = false;
+                std::error_code requestError;
+                if (!conditionalMarked[index] && !liveDebug->isCapturing() &&
+                    !std::filesystem::exists(liveDebug->directory() / "capture.request", requestError) &&
+                    !requestError) {
+                    std::ostringstream reason;
+                    reason << "conditional-flow block 0x" << std::hex << block.address() << " step " << std::dec << step;
+                    marked = liveDebug->request(reason.str());
+                    if (marked) conditionalMarked[index] = true;
+                }
+                conditionalFlow << std::dec << step << ',' << mmio.video().frameCount()
+                    << ",0x" << std::hex << reg(saturn::sh2::Register::PC)
+                    << ",0x" << block.address() << ",0x" << conditionalContext->caller()
+                    << ",0x" << reg(saturn::sh2::Register::PR);
+                for (const auto address : {0x06054548U, 0x06054549U, 0x0605457CU, 0x0605457FU})
+                    conditionalFlow << ",0x" << static_cast<unsigned>(state.readRaw8(address));
+                for (unsigned i = 0; i < 16U; ++i)
+                    conditionalFlow << ",0x" << reg(saturn::sh2::generalRegister(static_cast<std::uint8_t>(i)));
+                conditionalFlow << ",\"";
+                // Restrict string reads to the two WRAM regions; escape CSV quotes.
+                if ((r4 >= 0x06000000U && r4 <= 0x060FFFE0U) ||
+                    (r4 >= 0x00200000U && r4 <= 0x002FFFE0U)) {
+                    for (unsigned i = 0; i < 32U; ++i) {
+                        const auto c = state.readRaw8(r4 + i);
+                        if (c == 0U) break;
+                        if (c == '"') conditionalFlow << "\"\"";
+                        else conditionalFlow << ((c >= 32U && c <= 126U) ? static_cast<char>(c) : '.');
+                    }
+                }
+                conditionalFlow << "\"," << std::hex << std::setfill('0');
+                for (auto address = 0x0605E7B4U; address <= 0x0605E7F6U; ++address)
+                    conditionalFlow << std::setw(2) << static_cast<unsigned>(state.readRaw8(address));
+                conditionalFlow << ',' << std::dec << (marked ? 1 : 0) << '\n';
+                conditionalFlow.flush();
+                if (!conditionalFlow) std::cerr << "warning: conditional flow CSV write failed\n";
+            }
+        }
         if (block.address() == expectedEntry) bootServices.completeAipHandoff();
         // Scripted debug writes, used by the long automated routes to keep the
         // player alive. They run once per step and never change normal runs.
@@ -6699,14 +7048,21 @@ int boot(const Arguments& arguments) {
         state.writeState(saturn::sh2::stateSlot(saturn::sh2::Register::R7), count - 2U);
         ++acceleratedWordCopies;
     };
-    options.interrupt = [&scheduler, &mmio, &slave, &bootServices, &options](const saturn::sir::BasicBlock& block,
+    options.interrupt = [&scheduler, &mmio, &slave, &bootServices, &options,
+                         &realtimeVblank](const saturn::sir::BasicBlock& block,
                                             saturn::sir::MachineState& state,
                                             std::size_t step) {
         if (!slave.tick(state, bootServices, mmio, step,
                         options.resolveBlockAtStep, options.executeBlock)) {
             throw SlaveExecutionFailure{slave.pc(), step};
         }
-        return scheduler.beforeBlock(block, state, step, mmio);
+        const auto interrupt = scheduler.beforeBlock(block, state, step, mmio);
+        const auto& stats = scheduler.stats();
+        realtimeVblank.generated = stats.vblankEvents;
+        realtimeVblank.delivered = stats.deliveredVblankInEvents;
+        realtimeVblank.coalesced = stats.coalescedVblankInEvents;
+        realtimeVblank.dropped = stats.droppedVblankInEvents;
+        return interrupt;
     };
     options.observeBlock = [&reachedExpectedEntry, &recentBlocks, &recentBlockCount,
                             &recentForeground, &recentForegroundCount, expectedEntry,
@@ -7588,21 +7944,26 @@ int boot(const Arguments& arguments) {
         std::cout << "  audio output: " << arguments.audioOutput->string()
                   << (audioWriteFailure ? " (write-error)" : "") << '\n';
     }
-    // Sound command packets seen on the host mailbox, in order. Each row is a
-    // cue the game requested (0x01 starts a sequence, 0x08 loads a map, ...);
-    // the step column aligns it with scripted input and the captured audio.
+    // Sound command packets seen on the host mailbox, in order. The raw packet
+    // preserves all P1..P14 fields; decoded bank/sequence identify command 01.
     if (arguments.scspRequestsOutput) {
         std::ofstream requests(*arguments.scspRequestsOutput, std::ios::trunc);
         const auto& sound = mmio.scsp().stats();
         if (!requests) {
             std::cout << "  SCSP requests: write-error\n";
         } else {
-            requests << "step,command,control,bank,sequence\n";
-            for (const auto& request : sound.lastSoundRequests)
-                requests << request.schedulerTick << ',' << static_cast<unsigned>(request.command)
+            requests << "step,batch_id,packet_offset,command,control,bank,sequence,packet_hex\n";
+            for (const auto& request : sound.lastSoundRequests) {
+                requests << request.schedulerTick << ',' << request.batchId << ','
+                         << request.packetOffset << ',' << static_cast<unsigned>(request.command)
                          << ',' << static_cast<unsigned>(request.control)
                          << ',' << static_cast<unsigned>(request.bank)
-                         << ',' << static_cast<unsigned>(request.sequence) << '\n';
+                         << ',' << static_cast<unsigned>(request.sequence) << ',' << std::hex
+                         << std::setfill('0');
+                for (const auto byte : request.packet)
+                    requests << std::setw(2) << static_cast<unsigned>(byte);
+                requests << std::dec << '\n';
+            }
             std::cout << "  SCSP sound requests: " << sound.soundRequests << " total ("
                       << sound.sequenceRequests << " sequence starts), "
                       << sound.lastSoundRequests.size() << " recorded to "

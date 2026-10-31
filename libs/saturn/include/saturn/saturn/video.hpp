@@ -97,6 +97,12 @@ struct Vdp1CommandStats {
     core::Address lastAddress{};
 };
 
+struct Vdp1Activity {
+    std::uint64_t draws{};
+    std::uint64_t swaps{};
+    std::uint64_t newDrawsPresented{};
+};
+
 struct Vdp1CommandTraceEntry {
     core::Address address{};
     std::array<std::uint16_t, 16> words{};
@@ -132,6 +138,21 @@ struct Vdp1MemoryWriteTraceEntry {
     std::uint32_t value{};
 };
 
+// Guest/DMA writes to the NBG0 pattern-name pages used by X4's streamed maps.
+// The ring is included in live F8 captures so a bad visible cell can be tied
+// to the write that created it.
+struct Vdp2MapWriteTraceEntry {
+    std::size_t step{};
+    core::Address blockAddress{};
+    core::Address callerBlock{};
+    bool registersAvailable{};
+    std::array<std::uint32_t, 8> registers{};
+    std::uint32_t offset{};
+    std::uint8_t width{};
+    std::uint32_t previousValue{};
+    std::uint32_t value{};
+};
+
 // Owned copy of existing state; composed can precede the current VDP1 phase.
 // Empty memory vectors mean captureDebugSnapshot(false) omitted those dumps.
 struct VideoDebugSnapshot {
@@ -141,6 +162,7 @@ struct VideoDebugSnapshot {
     std::vector<std::uint8_t> vdp1Registers, vdp2Registers;
     std::vector<Vdp1MemoryWriteTraceEntry> vdp1RegisterWriteHistory;
     std::vector<Vdp1MemoryWriteTraceEntry> vdp1MemoryWriteHistory;
+    std::vector<Vdp2MapWriteTraceEntry> vdp2MapWriteHistory;
     std::vector<Vdp1CommandExecution> vdp1CommandHistory;
     std::size_t contextStep{};
     core::Address contextBlock{}, contextCaller{};
@@ -368,6 +390,11 @@ public:
     void setVdp1MemoryWriteRegisters(
         const std::array<std::uint32_t, 8>& registers,
         bool available) noexcept;
+    void setVdp2MapWriteTraceEnabled(bool enabled) noexcept;
+    [[nodiscard]] bool vdp2MapWriteTraceEnabled() const noexcept;
+    void setVdp2MapWriteRegisters(
+        const std::array<std::uint32_t, 8>& registers,
+        bool available) noexcept;
     void setExecutionContext(std::size_t step, core::Address block,
                              core::Address caller) noexcept;
     void setMapReadTrace(bool enabled);
@@ -377,6 +404,7 @@ public:
     void captureFirstReenabledBlackFrame(VideoDiagnosticSink sink);
     [[nodiscard]] bool displayEnabled() const noexcept;
     [[nodiscard]] const Vdp1CommandStats& vdp1CommandStats() const noexcept;
+    [[nodiscard]] Vdp1Activity vdp1Activity() const noexcept;
 
     // PTMR=1 starts a command-list execution immediately. PTMR=2 starts it at
     // each frame boundary. The draw-end edge is consumed by ScuEventScheduler
@@ -509,6 +537,11 @@ private:
     // framebuffer. Keep both selectors on bank zero so existing direct VRAM
     // tests and software that writes before configuring FBCR remain visible.
     std::uint8_t vdp1DrawBank_{};
+    std::array<std::uint64_t, 2> vdp1BankDrawSequences_{};
+    std::uint64_t vdp1DrawSequence_{};
+    std::uint64_t vdp1SwapCount_{};
+    std::uint64_t vdp1NewDrawPresentationCount_{};
+    std::array<std::uint64_t, 2> vdp1PresentedBankDrawSequences_{};
     bool vdp1FramebufferConfigured_{};
     bool vdp1SwapPending_{};
     bool vdp1ErasePending_{};
@@ -532,6 +565,10 @@ private:
     std::deque<Vdp1MemoryWriteTraceEntry> vdp1RegisterWriteHistory_;
     std::array<std::uint32_t, 8> vdp1MemoryWriteRegisters_{};
     bool vdp1MemoryWriteRegistersAvailable_{};
+    bool vdp2MapWriteTraceEnabled_{};
+    std::deque<Vdp2MapWriteTraceEntry> vdp2MapWriteHistory_;
+    std::array<std::uint32_t, 8> vdp2MapWriteRegisters_{};
+    bool vdp2MapWriteRegistersAvailable_{};
     std::vector<VideoWriteRegion> vramWrites_, cramWrites_;
     bool mapReadTraceEnabled_{};
     std::size_t contextStep_{};

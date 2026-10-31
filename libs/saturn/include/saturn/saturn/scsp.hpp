@@ -61,15 +61,41 @@ public:
     static constexpr core::Address kRequest1 = 0x0605E79AU;
 
     struct Stats {
-        // Sound command packet captured from the host queue, in order. Only the
-        // sequence-start command (0x01) is recorded: it carries the bank and
-        // sequence number, which is what identifies a cue.
+        // Sound command packets captured from the host queue, in order. Keep
+        // the complete packet because commands around a sequence start carry
+        // per-channel SCSP parameters needed to reproduce gameplay audio.
         struct SequenceRequest {
             std::uint64_t schedulerTick{};
+            std::uint64_t batchId{};
+            std::uint16_t packetOffset{};
+            // These decoded fields describe only command 0x01. packet remains
+            // authoritative for all commands, including 0x05/0x0E/0x14.
             std::uint8_t command{};
             std::uint8_t control{};
             std::uint8_t bank{};
             std::uint8_t sequence{};
+            std::array<std::uint8_t, 16> packet{};
+        };
+        // Exact state at publication of the target gameplay cue. A bounded
+        // ring keeps the mailbox, register file and candidate PCM bytes that
+        // existed before the 68000 consumed the batch.
+        static constexpr std::size_t kTargetPcmBytes = 0x15FFU;
+        static constexpr std::size_t kMailboxBytes = 0x80U;
+        static constexpr std::size_t kMaxPublishedB3S2 = 64U;
+        struct PublishedB3S2 {
+            std::uint64_t schedulerTick{};
+            std::uint64_t batchId{};
+            std::uint16_t packetOffset{};
+            std::uint32_t mailboxPointer{};
+            std::uint64_t driverCycles{};
+            std::uint32_t driverPc{};
+            std::uint8_t mailboxStatus0{};
+            std::uint8_t mailboxStatus1{};
+            std::array<std::uint8_t, 4> errorBitmap{};
+            std::array<std::uint8_t, 16> packet{};
+            std::array<std::uint8_t, kMailboxBytes> mailbox{};
+            std::array<std::uint8_t, 0x1000U> registers{};
+            std::array<std::uint8_t, kTargetPcmBytes> targetPcm{};
         };
         static constexpr std::size_t kMaxSoundRequests = 16384;
         std::uint64_t schedulerTicks{};
@@ -94,8 +120,15 @@ public:
         std::uint64_t noiseSamples{}, pitchLfoSamples{}, amplitudeLfoSamples{};
         std::uint64_t fmSamples{}, dspSendSamples{}, dspEffectSamples{}, dspSteps{};
         std::uint64_t sequenceRequests{}; // Only 0x01, even beyond the ring.
-        std::uint64_t soundRequests{};    // Every command packet, in the ring.
+        std::uint64_t soundRequests{};    // Every observed command packet.
+        std::uint64_t soundRequestBatches{};
         std::vector<SequenceRequest> lastSoundRequests;
+        // Keep the roughly 640 KiB payload off Mmio/runtime stack objects.
+        std::vector<PublishedB3S2> publishedB3S2 =
+            std::vector<PublishedB3S2>(kMaxPublishedB3S2);
+        std::size_t publishedB3S2Count{};
+        std::size_t publishedB3S2Next{};
+        std::uint64_t publishedB3S2Overwrites{};
         // Scheduler steps elapsed, the same unit --pad-sequence uses. Recorded
         // with each request so a capture can be aligned to scripted input.
         std::uint64_t schedulerSteps{};
@@ -116,6 +149,9 @@ public:
 
     [[nodiscard]] std::optional<std::uint32_t> read(core::Address address,
                                                      std::uint8_t width) const;
+    // Snapshot the implemented register file without consuming the live MIDI
+    // input FIFO; use the real hardware register file size (4 KiB).
+    [[nodiscard]] std::vector<std::uint8_t> captureDebugRegisterSnapshot() const;
     [[nodiscard]] bool write(core::Address address, std::uint8_t width,
                               std::uint32_t value);
 
@@ -168,7 +204,10 @@ private:
     void renderSamples(std::size_t count);
     void finishAudioFrame();
     void advanceSoundCpu(std::uint64_t targetCycles, bool flush = false);
-    void recordSequenceRequest(std::size_t packet);
+    void recordSequenceRequest(std::size_t packet, std::uint64_t batchId,
+                               std::uint16_t packetOffset);
+    void recordPublishedB3S2(std::size_t packet, std::uint64_t batchId,
+                             std::uint16_t packetOffset);
     [[nodiscard]] bool blockClockActive() const noexcept {
         // Device playback must not move the real 68000 ahead of the SH-2.
         // Keep driver execution/register writes on the same guest clock in

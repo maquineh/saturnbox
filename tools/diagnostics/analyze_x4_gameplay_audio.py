@@ -1,9 +1,10 @@
 """Match in-game SCSP sequence requests to the catalogue of rendered cues.
 
-The runtime now records every `01` sequence-start packet it sees on the host
-mailbox, with the scheduler step. Because the run is deterministic, a step maps
-to an exact audio sample: with `--vblank-blocks 14000` a frame is 14000 steps
-and 735 samples, so `samples = step * 735 / 14000`.
+The runtime records every full 16-byte sound command packet it sees on the
+host mailbox, including batch and slot offsets; this script filters `01`
+sequence starts. Because the run is deterministic, a step maps to an exact
+audio sample: with `--vblank-blocks 14000` a frame is 14000 steps and 735
+samples, so `samples = step * 735 / 14000`.
 
 For each request this script cuts the captured audio just before the request,
 measures the onset and level, and scores the window against every WAV the

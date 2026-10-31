@@ -254,11 +254,15 @@ São sons de acerto/dano, não um aviso único. Por exclusividade, o WARNING é
 
 Tentei casar o áudio da fase com os WAVs gerados pelo probe. A correlação
 máxima foi 0,44 (`b3 s7` na janela 351–355 s) e 0,56 (`b3 s2` na janela
-167–172 s), longe do ~1,0 esperado para o mesmo som isolado. A explicação mais
-provável: cada `01` chega junto de um pacote `05` e um `14` com parâmetros por
-canal (volume, pan, pitch), e o probe não os reaplica — então os registradores
-do slot não são os mesmos e a forma de onda muda. Reproduzir esses pacotes no
-probe é o próximo passo para uma identificação por correlação.
+167–172 s), longe do ~1,0 esperado para o mesmo som isolado. A hipótese de que
+`05` e `14` continham volume/pan/pitch por canal estava errada. No guia Sega,
+`05` define volume e fade da sequência, `0E` controla o pan da sequência, `14`
+escolhe o modo de tempo e `15` aplica a razão relativa de tempo. Esses comandos,
+o mapa PCM ativo e o estado dos registradores ainda podem explicar a diferença,
+mas a correlação não identifica qual fator faltou sem os pacotes completos do
+mesmo evento. A captura futura precisa guardar os 16 bytes de cada comando e o
+estado SCSP sincronizado; consulte o
+[guia Sega de comandos de som](https://www.infochunk.com/saturn/segahtml_en/sndt/prog/drve/sndcmd_.htm).
 
 As janelas de áudio estão em `build-scsp/tmp-test/boss-clips/`
 (`09-transition-350-356.wav`, `08-three-oneshots-352.2-354.6.wav`,

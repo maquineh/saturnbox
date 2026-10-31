@@ -189,6 +189,29 @@ std::optional<std::uint32_t> ScspRuntime::read(core::Address address,
     return std::nullopt;
 }
 
+std::vector<std::uint8_t> ScspRuntime::captureDebugRegisterSnapshot() const {
+    std::vector<std::uint8_t> snapshot(saturn::platform::ScspSynth::kRegisterBytes);
+    if (!driver_) {
+        std::copy_n(registers_.begin(), snapshot.size(), snapshot.begin());
+        return snapshot;
+    }
+
+    // ScspTiming::read(0x405) consumes an incoming MIDI byte and may clear an
+    // IRQ. Read a private copy of the timing device and visit that lane last,
+    // leaving the live driver state untouched and the other registers stable.
+    auto timing = driver_->timing;
+    for (std::size_t offset = 0; offset < snapshot.size(); ++offset) {
+        if (offset == ScspTiming::kMidiStatus + 1U) continue;
+        const auto timed = timing.read(static_cast<std::uint16_t>(offset), 1U);
+        const auto value = timed ? *timed : driver_->synth.read(
+            static_cast<std::uint32_t>(offset), 1U).value_or(0U);
+        snapshot[offset] = static_cast<std::uint8_t>(value);
+    }
+    snapshot[ScspTiming::kMidiStatus + 1U] = static_cast<std::uint8_t>(
+        timing.read(ScspTiming::kMidiStatus + 1U, 1U).value_or(0U));
+    return snapshot;
+}
+
 bool ScspRuntime::write(core::Address address, std::uint8_t width,
                         std::uint32_t value) {
     if (width != 1U && width != 2U && width != 4U) {
@@ -198,17 +221,18 @@ bool ScspRuntime::write(core::Address address, std::uint8_t width,
     if (inRange(address, kRamBase, kRamSize)) {
         const auto previousStatus = ram_[kCommandStatus - kRamBase];
         writeBytes(ram_, static_cast<std::size_t>(address - kRamBase), width, value);
-        // The host raises bit 7 of 0x4E0 once a command batch is queued. Record
-        // the sequence-start packets here: the bank and sequence number are what
-        // identifies a cue, and the step counter aligns them with input.
+        // The host raises bit 7 of 0x4E0 once a command batch is queued.
+        // Preserve each full 16-byte packet before the sound CPU consumes it.
         if ((previousStatus & 0x80U) == 0U &&
             (ram_[kCommandStatus - kRamBase] & 0x80U) != 0U) {
             const auto host = static_cast<std::size_t>(readBytes(ram_, 0x404U, 4U));
             if (host >= 0x500U && host <= ram_.size() - 0x100U) {
+                const auto batchId = ++stats_.soundRequestBatches;
                 for (std::size_t packet = host; packet < host + 0x80U; packet += 16U) {
                     if (ram_[packet] == 0U) continue;
                     if (driver_) ++stats_.soundCommands[ram_[packet]];
-                    recordSequenceRequest(packet);
+                    recordSequenceRequest(packet, batchId,
+                        static_cast<std::uint16_t>(packet - host));
                 }
             }
         }
@@ -437,18 +461,63 @@ void ScspRuntime::advanceSoundCpu(std::uint64_t targetCycles, bool flush) {
     frameSoundCpuCycles_ += driver_->runCpu(due);
 }
 
-void ScspRuntime::recordSequenceRequest(std::size_t packet) {
+void ScspRuntime::recordSequenceRequest(std::size_t packet, std::uint64_t batchId,
+                                        std::uint16_t packetOffset) {
     ++stats_.soundRequests;
     if (ram_[packet] == 0x01U) ++stats_.sequenceRequests;
     if (stats_.lastSoundRequests.size() >= Stats::kMaxSoundRequests)
         stats_.lastSoundRequests.erase(stats_.lastSoundRequests.begin());
     Stats::SequenceRequest request;
     request.schedulerTick = stats_.schedulerSteps;
+    request.batchId = batchId;
+    request.packetOffset = packetOffset;
     request.command = ram_[packet];
     request.control = ram_[packet + 2U];
     request.bank = ram_[packet + 3U];
     request.sequence = ram_[packet + 4U];
+    std::copy_n(ram_.begin() + static_cast<std::ptrdiff_t>(packet), request.packet.size(),
+                request.packet.begin());
     stats_.lastSoundRequests.push_back(request);
+    if (request.command == 0x01U && request.bank == 3U && request.sequence == 2U)
+        recordPublishedB3S2(packet, batchId, packetOffset);
+}
+
+void ScspRuntime::recordPublishedB3S2(std::size_t packet, std::uint64_t batchId,
+                                      std::uint16_t packetOffset) {
+    auto& snapshot = stats_.publishedB3S2[stats_.publishedB3S2Next];
+    snapshot = {};
+    snapshot.schedulerTick = stats_.schedulerSteps;
+    snapshot.batchId = batchId;
+    snapshot.packetOffset = packetOffset;
+    snapshot.mailboxPointer = static_cast<std::uint32_t>(packet - packetOffset);
+    snapshot.driverCycles = stats_.driverCycles;
+    snapshot.driverPc = stats_.driverPc;
+    snapshot.mailboxStatus0 = ram_[0x4E0U];
+    snapshot.mailboxStatus1 = ram_[0x4E1U];
+    std::copy_n(ram_.begin() + 0x420U, snapshot.errorBitmap.size(),
+                snapshot.errorBitmap.begin());
+    std::copy_n(ram_.begin() + static_cast<std::ptrdiff_t>(packet),
+                snapshot.packet.size(), snapshot.packet.begin());
+    std::copy_n(ram_.begin() + snapshot.mailboxPointer, snapshot.mailbox.size(),
+                snapshot.mailbox.begin());
+    const auto registers = captureDebugRegisterSnapshot();
+    std::copy_n(registers.begin(),
+                std::min(registers.size(), snapshot.registers.size()),
+                snapshot.registers.begin());
+    // Fixed diagnostic candidate, not a sample address derived from the
+    // current bank/program. Keep the offset identical to the audited raw span.
+    constexpr std::size_t kTargetPcmOffset = 0x5BAF2U;
+    static_assert(kTargetPcmOffset + Stats::kTargetPcmBytes <= kRamSize);
+    std::copy_n(ram_.begin() + kTargetPcmOffset, snapshot.targetPcm.size(),
+                snapshot.targetPcm.begin());
+
+    stats_.publishedB3S2Next =
+        (stats_.publishedB3S2Next + 1U) % Stats::kMaxPublishedB3S2;
+    if (stats_.publishedB3S2Count < Stats::kMaxPublishedB3S2) {
+        ++stats_.publishedB3S2Count;
+    } else {
+        ++stats_.publishedB3S2Overwrites;
+    }
 }
 
 void ScspRuntime::onBlockTick() {

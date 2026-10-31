@@ -57,6 +57,7 @@ std::uint64_t estimateBytes(const platform::VideoDebugSnapshot& s, const DebugMe
     for (const auto& a : m.attachments) total += a.bytes.size();
     total += (s.vdp1RegisterWriteHistory.size() + s.vdp1MemoryWriteHistory.size()) * 64ULL;
     for (const auto& c : s.vdp1CommandHistory) total += c.commands.size() * sizeof(platform::Vdp1CommandTraceEntry);
+    total += s.vdp2MapWriteHistory.size() * sizeof(platform::Vdp2MapWriteTraceEntry);
     return total;
 }
 
@@ -313,6 +314,20 @@ struct LiveDebugSession::Impl {
                         f << "command," << command.address;
                         for (const auto word : command.words) f << ',' << word;
                         f << '\n';
+                    }
+                }
+                if (r.kind == "post" && r.sequence == kPreFrames) {
+                    f << "VDP2 NBG0 map write history: "
+                      << s.vdp2MapWriteHistory.size() << '\n';
+                    for (const auto& write : s.vdp2MapWriteHistory) {
+                        f << "vdp2map," << write.step << ",0x" << std::hex
+                          << write.blockAddress << ",0x" << write.callerBlock
+                          << ',' << (write.registersAvailable ? 1 : 0)
+                          << ",0x" << write.offset << ',' << std::dec
+                          << static_cast<unsigned>(write.width) << ",0x" << std::hex
+                          << write.previousValue << ",0x" << write.value;
+                        for (const auto reg : write.registers) f << ",0x" << reg;
+                        f << std::dec << '\n';
                     }
                 }
             }

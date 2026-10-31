@@ -56,6 +56,9 @@ public:
 
         std::uint64_t elapsedBlocks{};
         std::uint64_t vblankEvents{};
+        std::uint64_t coalescedVblankInEvents{};
+        std::uint64_t deliveredVblankInEvents{};
+        std::uint64_t droppedVblankInEvents{};
         std::uint64_t vblankOutEvents{};
         std::uint64_t hblankEvents{};
         std::uint64_t timer0Events{};

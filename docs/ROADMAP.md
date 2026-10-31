@@ -72,9 +72,9 @@ The four techniques prioritized in the Anybox article are applied as follows:
   paletted sprites, clipping, and local coordinates; VDP2 applies W0/W1
   windows; `INTBACK` is resampled at VBlank; and SCSP produces stereo PCM
   frames per VBlank. The CLI exposes `--frame-dir` (PPM) and `--audio-output`
-  (WAV) for an external frontend. `saturn-sh2 launch` also opens a 320×224
-  Win32 window and plays PCM through `waveOut`, paced at 60 Hz and closed with
-  the window.
+  (WAV) for an external frontend. `saturn-sh2 launch` also opens a Win32 host
+  window (1280×720 client by default), presents the native Saturn frame with
+  aspect preserved, and plays PCM through `waveOut`, paced at 60 Hz.
 
 ## First local SaturnBox replay (2026-10-27)
 
@@ -206,6 +206,26 @@ The Win32 launcher turns the harness into a basic interactive window/audio
 session. A cross-platform backend and faster SIR/JIT execution are still needed
 to sustain 60 Hz on slower hardware. Until then, `--frame-dir` and
 `--audio-output` provide a verifiable bridge for external frontends.
+
+## Observed native module consolidation (2026-10-31)
+
+Five previously generated AOT modules were merged by address and both SIR
+signature fields: opening/title, an extended route through the ST04 resource
+stream, the player-route module from 27/10, a fresh AOT pass over its observed
+entry list, and a historical player-stage module from the sibling
+`saturn-recomp` checkout. Their arrays contain 46,339 entries in total and
+17,300 unique address/signature pairs across 15,411 guest addresses; 1,889
+addresses have multiple signatures. The historical module adds 2,715 pairs;
+all 10,976 overlapping generated bodies match after normalizing function and
+temporary names. This is a source-table comparison, not a runtime variant
+selection result. The merged sources compiled into
+`build/native-route-20261031-combined-v2-compile/tools/saturn-sh2/Release/saturn-sh2.exe`
+with tests disabled. The executable was not run. Provenance, the compatibility
+comparison, and SHA-256 values are in
+`build/rockman/native-route-20261031-combined-v2/manifest.json` and
+`coverage-report.json`. This raises static code coverage; it does not prove
+behavior across all stages or make the SaturnBox runtime a finished standalone
+port.
 
 ## Scenario-based validation method
 

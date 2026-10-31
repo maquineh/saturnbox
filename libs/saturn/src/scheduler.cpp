@@ -72,6 +72,8 @@ std::optional<sir::InterruptRequest> ScuEventScheduler::beforeBlock(
         // SCU DMA channels whose activation factor is VBlank-IN are started
         // at the same edge as the interrupt factor is raised.
         mmio.scuDma().onVBlank();
+        if ((mmio.scuInterruptStatus() & kVBlankInStatus) != 0U)
+            ++stats_.coalescedVblankInEvents;
         mmio.raiseScuInterrupt(kVBlankInStatus);
         // The IN handler may request VBE erase/change during this blank.
         // Finish it at OUT, before the guest clears VBE in its OUT handler.
@@ -301,10 +303,12 @@ std::optional<sir::InterruptRequest> ScuEventScheduler::beforeBlock(
     reportedMasked_ = false;
     if (target == 0U || target == kDummyInterruptHandler) {
         ++stats_.droppedEvents;
+        if (factor == 0U) ++stats_.droppedVblankInEvents;
         return std::nullopt;
     }
 
     ++stats_.deliveredInterrupts;
+    if (factor == 0U) ++stats_.deliveredVblankInEvents;
     return sir::InterruptRequest{target, returnMode};
 }
 
